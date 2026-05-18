@@ -66,7 +66,7 @@ type ChatMessage = {
 
 type ChatThread = {
   id: string;
-  kind?: "chat" | "meeting";
+  type: ThreadType;
   personaId?: string;
   personaName?: string;
   provider?: string;
@@ -74,6 +74,7 @@ type ChatThread = {
   title: string;
   subtitle: string;
   updatedAt: string;
+  messages: ChatMessage[];
 };
 
 type BackendConversation = {
@@ -168,8 +169,20 @@ type BackendState = {
   label: string;
 };
 
-type RailTarget = "chat" | "meeting" | "persona" | "settings";
+type ViewMode = "chat" | "persona_builder" | "meeting" | "settings";
 type BuilderMode = "create" | "edit" | null;
+type ThreadType = "neutral" | "persona";
+type MeetingStatus = "draft" | "running" | "completed" | "error";
+
+type Meeting = {
+  id: string;
+  topic: string;
+  personaIds: string[];
+  agentIds: string[];
+  transcript?: string;
+  status: MeetingStatus;
+  updatedAt: string;
+};
 
 type MeetingMember = {
   id: string;
@@ -556,12 +569,12 @@ function personaFromStored(record: StoredPersona): Persona {
     tools: { ...DEFAULT_TOOLS, ...(record.tools || {}) },
     avatar: record.avatar?.kind === "image" || record.avatar?.kind === "initials"
       ? {
-          kind: record.avatar.kind,
-          color: record.avatar.color || "#7bdcc3",
-          path: record.avatar.path,
-          filename: record.avatar.filename,
-          previewUrl: record.avatar.previewUrl || uploadUrl(record.avatar.path, record.avatar.filename),
-        }
+        kind: record.avatar.kind,
+        color: record.avatar.color || "#7bdcc3",
+        path: record.avatar.path,
+        filename: record.avatar.filename,
+        previewUrl: record.avatar.previewUrl || uploadUrl(record.avatar.path, record.avatar.filename),
+      }
       : { kind: "initials", color: "#7bdcc3" },
     knowledgeFiles: Array.isArray(record.knowledge_files) ? record.knowledge_files : [],
   };
@@ -600,7 +613,7 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [isSending, setIsSending] = useState(false);
-  const [activeRail, setActiveRail] = useState<RailTarget>("chat");
+  const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [slashOptions, setSlashOptions] = useState<SlashOption[]>(FALLBACK_SLASH_OPTIONS);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -608,33 +621,41 @@ function App() {
     status: "checking",
     label: "checking",
   });
-  const [activePersona, setActivePersona] = useState<Persona>(() => defaultPersona());
-  const [draftPersona, setDraftPersona] = useState<Persona>(() => defaultPersona());
-  const [builderMode, setBuilderMode] = useState<BuilderMode>(null);
-  const [savedPersonas, setSavedPersonas] = useState<StoredPersona[]>([]);
-  const [personaSaving, setPersonaSaving] = useState(false);
-  const [personaNotice, setPersonaNotice] = useState("");
-  const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
-  const [memoryDraft, setMemoryDraft] = useState("");
-  const [meetingRunning, setMeetingRunning] = useState(false);
-  const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
-  const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
-  const [currentThreadId, setCurrentThreadId] = useState(INITIAL_THREAD_ID);
-  const [threads, setThreads] = useState<ChatThread[]>([
-    {
+
+  // Normalized State
+  const [personasById, setPersonasById] = useState<Record<string, StoredPersona>>({});
+  const [threadIds, setThreadIds] = useState<string[]>([INITIAL_THREAD_ID]);
+  const [threadsById, setThreadsById] = useState<Record<string, ChatThread>>({
+    [INITIAL_THREAD_ID]: {
       id: INITIAL_THREAD_ID,
-      personaId: "ouroboros",
+      type: "neutral",
+      personaId: undefined,
       personaName: "Ouroboros",
       provider: DEFAULT_PROVIDER,
       modelName: DEFAULT_MODEL,
       title: "Local Ouroboros",
       subtitle: `${DEFAULT_PROVIDER} / ${DEFAULT_MODEL}`,
       updatedAt: nowIso(),
-    },
-  ]);
-  const [messagesByThread, setMessagesByThread] = useState<Record<string, ChatMessage[]>>({
-    [INITIAL_THREAD_ID]: [makeWelcomeMessage()],
+      messages: [makeWelcomeMessage()]
+    }
   });
+  const [activeThreadId, setActiveThreadId] = useState<string>(INITIAL_THREAD_ID);
+
+  const [meetingsById, setMeetingsById] = useState<Record<string, Meeting>>({});
+  const [activeMeetingId, setActiveMeetingId] = useState<string | null>(null);
+
+  const [draftPersona, setDraftPersona] = useState<Persona>(() => defaultPersona());
+  const [builderMode, setBuilderMode] = useState<BuilderMode>(null);
+
+  const [personaSaving, setPersonaSaving] = useState(false);
+  const [personaNotice, setPersonaNotice] = useState("");
+  const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
+  const [memoryDraft, setMemoryDraft] = useState("");
+
+  // Meeting specific workspace state
+  const [meetingRunning, setMeetingRunning] = useState(false);
+  const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
+  const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -649,8 +670,23 @@ function App() {
   const modelInputRef = useRef<HTMLInputElement>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
 
-  const messages = messagesByThread[currentThreadId] || [];
-  const currentThread = threads.find((thread) => thread.id === currentThreadId) || threads[0];
+  const currentThread = threadsById[activeThreadId];
+  const messages = currentThread?.messages || [];
+  const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at)), [personasById]);
+
+  function personaForId(personaId?: string, fallback = draftPersona): Persona {
+    const record = personasById[personaId || ""];
+    if (record) return personaFromStored(record);
+    if (!personaId) return fallback;
+    return { ...defaultPersona(), id: personaId, name: personaId === "ouroboros" ? "Ouroboros" : personaId };
+  }
+
+  function personaForThread(thread?: ChatThread): Persona {
+    if (!thread || !thread.personaId) return { ...neutralChatPersona(), name: thread?.personaName || "Ouroboros" };
+    const p = personaForId(thread.personaId);
+    return { ...p, id: thread.personaId, name: thread.personaName || p.name };
+  }
+
   const currentChatPersona = personaForThread(currentThread);
   const currentProvider = currentThread?.provider || currentChatPersona.modelSettings.provider || provider || DEFAULT_PROVIDER;
   const currentModel = currentThread?.modelName || currentChatPersona.modelSettings.name || currentChatPersona.model || model || DEFAULT_MODEL;
@@ -718,7 +754,7 @@ function App() {
 
     loadPersonas().catch(() => {
       if (!cancelled) {
-        setSavedPersonas([]);
+        setPersonasById({});
       }
     });
 
@@ -729,7 +765,7 @@ function App() {
 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, currentThreadId, isSending]);
+  }, [messages.length, activeThreadId, isSending]);
 
   useEffect(() => {
     setSlashIndex(0);
@@ -757,78 +793,40 @@ function App() {
     });
   }
 
-  function personaForId(personaId?: string, fallback = activePersona): Persona {
-    const record = savedPersonas.find((item) => item.id === personaId);
-    if (record) {
-      return personaFromStored(record);
-    }
-    if (!personaId || fallback.id === personaId) {
-      return fallback;
-    }
-    return {
-      ...defaultPersona(),
-      id: personaId,
-      name: personaId === "ouroboros" ? "Ouroboros" : personaId,
-    };
-  }
-
-  function personaForThread(thread?: ChatThread): Persona {
-    if (!thread) {
-      return activePersona;
-    }
-    if (!thread.personaId) {
-      return {
-        ...neutralChatPersona(),
-        name: thread.personaName || "Ouroboros",
-      };
-    }
-    const persona = personaForId(thread.personaId, activePersona);
-    if (persona.id === thread.personaId) {
-      return {
-        ...persona,
-        name: persona.name || thread.personaName || thread.personaId || "Ouroboros",
-      };
-    }
-    return {
-      ...persona,
-      id: thread.personaId || persona.id,
-      name: thread.personaName || persona.name,
-    };
-  }
-
   function activateChatPersona(nextPersona: Persona) {
-    setActivePersona(nextPersona);
+    // setActivePersona is removed. A thread handles its own persona.
     setProvider(nextPersona.modelSettings.provider || DEFAULT_PROVIDER);
     setModel(nextPersona.modelSettings.name || nextPersona.model || DEFAULT_MODEL);
   }
 
   function mergeThreads(nextThreads: ChatThread[], options: { focusId?: string } = {}) {
-    setThreads((previous) => {
-      const byId = new Map(previous.map((thread) => [thread.id, thread]));
-      nextThreads.forEach((thread) => {
-        byId.set(thread.id, { ...(byId.get(thread.id) || {}), ...thread });
+    setThreadsById((prev) => {
+      const next = { ...prev };
+      nextThreads.forEach(t => next[t.id] = { ...next[t.id], ...t });
+      return next;
+    });
+    setThreadIds((prev) => {
+      const set = new Set([...nextThreads.map(t => t.id), ...prev]);
+      return Array.from(set).sort((a, b) => {
+        // Sorting logic could go here, but for now we just keep them unique.
+        return 0;
       });
-      return Array.from(byId.values()).sort(
-        (left, right) => timestampValue(right.updatedAt) - timestampValue(left.updatedAt),
-      );
     });
     if (options.focusId) {
-      setCurrentThreadId(options.focusId);
+      setActiveThreadId(options.focusId);
     }
   }
 
   async function loadPersonas() {
     const payload = await fetchJson<{ personas?: StoredPersona[] }>("/api/ouroboros-chat/personas");
-    const records = (payload.personas || [])
-      .filter((record) => record.id && !record.archived)
-      .sort((left, right) => timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at));
-    setSavedPersonas(records);
+    const records = (payload.personas || []).filter((record) => record.id && !record.archived);
+
+    setPersonasById((prev) => {
+      const next = { ...prev };
+      records.forEach(r => next[r.id] = r);
+      return next;
+    });
     mergeMeetingPersonas(records);
-    if (!activePersona.id && records.length) {
-      const first = records.find((record) => record.id === "ouroboros") || records[0];
-      const firstPersona = applyPersonaSelection(first);
-      void loadPersonaConversations(first.id, first.name, firstPersona.introduction);
-    }
   }
 
   async function loadMemory(personaId: string) {
@@ -843,19 +841,27 @@ function App() {
     return nextPersona;
   }
 
-  async function loadPersonaConversations(personaId: string, personaName = activePersona.name, personaIntro = "") {
+  async function loadPersonaConversations(personaId: string, personaName?: string, personaIntro = "") {
+    const safeName = personaName || currentChatPersona.name;
     const payload = await fetchJson<{ conversations?: BackendConversation[] }>(`/api/ouroboros-chat/conversations?persona_id=${encodeURIComponent(personaId)}`);
     const conversations = payload.conversations || [];
     const conversationPersona = personaForId(personaId);
     if (!conversations.length) {
-      const existingThread = threads.find((thread) => thread.personaId === personaId);
+      const existingThread = Object.values(threadsById).find((thread) => thread.personaId === personaId);
       if (existingThread) {
-        setCurrentThreadId(existingThread.id);
+        setActiveThreadId(existingThread.id);
         activateChatPersona(conversationPersona);
-        setMessagesByThread((previous) => ({
-          ...previous,
-          [existingThread.id]: previous[existingThread.id] || [makeWelcomeMessage(personaName, personaIntro)],
-        }));
+        setThreadsById((prev) => {
+          const thread = prev[existingThread.id];
+          if (!thread) return prev;
+          return {
+            ...prev,
+            [existingThread.id]: {
+              ...thread,
+              messages: thread.messages.length ? thread.messages : [makeWelcomeMessage(safeName, personaIntro)]
+            }
+          };
+        });
         return;
       }
       const id = uid("thread");
@@ -863,58 +869,49 @@ function App() {
         [
           {
             id,
+            type: "persona",
             personaId,
-            personaName,
+            personaName: safeName,
             provider: conversationPersona.modelSettings.provider,
             modelName: conversationPersona.modelSettings.name,
             title: "New thread",
-            subtitle: `${personaName} / ${conversationPersona.modelSettings.name || DEFAULT_MODEL}`,
+            subtitle: `${safeName} / ${conversationPersona.modelSettings.name || DEFAULT_MODEL}`,
             updatedAt: nowIso(),
+            messages: [makeWelcomeMessage(safeName, personaIntro)]
           },
         ],
         { focusId: id },
       );
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [id]: previous[id] || [makeWelcomeMessage(personaName, personaIntro)],
-      }));
       return;
     }
-    const mapped = conversations.map((conversation) => ({
+
+    // Check if these conversations actually have the type mapped.
+    const mapped = conversations.map((conversation): ChatThread => ({
       id: conversation.id,
+      type: conversation.persona_id ? "persona" : "neutral",
       personaId: conversation.persona_id,
-      personaName,
+      personaName: safeName,
       provider: conversationPersona.modelSettings.provider,
       modelName: conversationPersona.modelSettings.name,
       title: conversation.title || "Thread",
-      subtitle: `${personaName} / ${conversationPersona.modelSettings.name || DEFAULT_MODEL}`,
+      subtitle: `${safeName} / ${conversationPersona.modelSettings.name || DEFAULT_MODEL}`,
       updatedAt: conversation.updated_at || nowIso(),
+      messages: [] // Will fetch on open
     }));
     mergeThreads(mapped, { focusId: mapped[0].id });
     await openConversation(mapped[0].id);
   }
 
   async function openConversation(conversationId: string) {
-    setCurrentThreadId(conversationId);
+    setActiveThreadId(conversationId);
     try {
       const payload = await fetchJson<{ conversation?: BackendConversation }>(`/api/ouroboros-chat/conversations/${encodeURIComponent(conversationId)}`);
       const conversation = payload.conversation;
-      const fallbackThread = threads.find((thread) => thread.id === conversationId);
-      const personaId = conversation?.persona_id || fallbackThread?.personaId || activePersona.id || "ouroboros";
-      const threadPersona = personaForId(personaId);
+      const fallbackThread = threadsById[conversationId];
+      const personaId = conversation?.persona_id || fallbackThread?.personaId;
+      const threadPersona = personaId ? personaForId(personaId) : neutralChatPersona();
+
       activateChatPersona(threadPersona);
-      mergeThreads([
-        {
-          id: conversationId,
-          personaId,
-          personaName: threadPersona.name,
-          provider: threadPersona.modelSettings.provider,
-          modelName: threadPersona.modelSettings.name,
-          title: conversation?.title || fallbackThread?.title || "New thread",
-          subtitle: `${threadPersona.name} / ${threadPersona.modelSettings.name || DEFAULT_MODEL}`,
-          updatedAt: conversation?.updated_at || fallbackThread?.updatedAt || nowIso(),
-        },
-      ]);
       const messages: ChatMessage[] = (payload.conversation?.messages || []).map((message) => ({
         id: message.id || uid("message"),
         role: message.role === "user" ? "user" : "assistant",
@@ -922,18 +919,26 @@ function App() {
         createdAt: message.createdAt || message.created_at || nowIso(),
         status: "ready",
       }));
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [conversationId]: messages.length ? messages : [makeWelcomeMessage(threadPersona.name, threadPersona.introduction)],
-      }));
+
+      mergeThreads([
+        {
+          id: conversationId,
+          type: personaId ? "persona" : "neutral",
+          personaId,
+          personaName: threadPersona.name,
+          provider: threadPersona.modelSettings.provider,
+          modelName: threadPersona.modelSettings.name,
+          title: conversation?.title || fallbackThread?.title || "New thread",
+          subtitle: `${threadPersona.name} / ${threadPersona.modelSettings.name || DEFAULT_MODEL}`,
+          updatedAt: conversation?.updated_at || fallbackThread?.updatedAt || nowIso(),
+          messages: messages.length ? messages : fallbackThread?.messages || [makeWelcomeMessage(threadPersona.name, threadPersona.introduction)],
+        },
+      ]);
     } catch {
-      const fallbackThread = threads.find((thread) => thread.id === conversationId);
+      const fallbackThread = threadsById[conversationId];
       const threadPersona = personaForThread(fallbackThread);
       activateChatPersona(threadPersona);
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [conversationId]: previous[conversationId] || [makeWelcomeMessage(threadPersona.name, threadPersona.introduction)],
-      }));
+      // Let it remain what it was
     }
   }
 
@@ -960,11 +965,15 @@ function App() {
   }
 
   function updateCurrentMessages(updater: (current: ChatMessage[]) => ChatMessage[]) {
-    setMessagesByThread((previous) => {
-      const current = previous[currentThreadId] || [];
+    setThreadsById((prev) => {
+      const thread = prev[activeThreadId];
+      if (!thread) return prev;
       return {
-        ...previous,
-        [currentThreadId]: updater(current),
+        ...prev,
+        [activeThreadId]: {
+          ...thread,
+          messages: updater(thread.messages)
+        }
       };
     });
   }
@@ -974,7 +983,7 @@ function App() {
     const id = uid("thread");
     const thread: ChatThread = {
       id,
-      kind: "chat",
+      type: "neutral",
       personaId: undefined,
       personaName: neutral.name,
       provider: DEFAULT_PROVIDER,
@@ -982,10 +991,13 @@ function App() {
       title: "New thread",
       subtitle: `${neutral.name} / ${DEFAULT_MODEL}`,
       updatedAt: nowIso(),
+      messages: [makeWelcomeMessage(neutral.name, neutral.introduction)]
     };
-    setThreads((previous) => [thread, ...previous]);
-    setMessagesByThread((previous) => ({ ...previous, [id]: [makeWelcomeMessage(neutral.name, neutral.introduction)] }));
-    setCurrentThreadId(id);
+
+    setThreadsById(prev => ({ ...prev, [id]: thread }));
+    setThreadIds(prev => [id, ...prev]);
+    setActiveThreadId(id);
+
     activateChatPersona(neutral);
     setProvider(DEFAULT_PROVIDER);
     setModel(DEFAULT_MODEL);
@@ -996,13 +1008,13 @@ function App() {
   }
 
   function updateThreadAfterSend(threadId: string, text: string) {
-    setThreads((previous) =>
-      previous.map((thread) => {
-        if (thread.id !== threadId) {
-          return thread;
-        }
-        const shortTitle = text.trim().replace(/\s+/g, " ").slice(0, 42);
-        return {
+    setThreadsById(prev => {
+      const thread = prev[threadId];
+      if (!thread) return prev;
+      const shortTitle = text.trim().replace(/\s+/g, " ").slice(0, 42);
+      return {
+        ...prev,
+        [threadId]: {
           ...thread,
           title: thread.title === "New thread" || thread.title === "Local Ouroboros" ? shortTitle || thread.title : thread.title,
           personaId: currentChatPersona.id || thread.personaId,
@@ -1011,24 +1023,25 @@ function App() {
           modelName: currentModel,
           subtitle: `${currentChatPersona.name} / ${currentModel}`,
           updatedAt: nowIso(),
-        };
-      }),
-    );
+        }
+      };
+    });
   }
 
   function updateCurrentThreadSettings(next: { provider?: string; modelName?: string }) {
-    setThreads((previous) =>
-      previous.map((thread) =>
-        thread.id === currentThreadId
-          ? {
-              ...thread,
-              provider: next.provider ?? thread.provider,
-              modelName: next.modelName ?? thread.modelName,
-              subtitle: `${thread.personaName || currentChatPersona.name} / ${next.modelName ?? thread.modelName ?? currentModel}`,
-            }
-          : thread,
-      ),
-    );
+    setThreadsById(prev => {
+      const thread = prev[activeThreadId];
+      if (!thread) return prev;
+      return {
+        ...prev,
+        [activeThreadId]: {
+          ...thread,
+          provider: next.provider ?? thread.provider,
+          modelName: next.modelName ?? thread.modelName,
+          subtitle: `${thread.personaName || currentChatPersona.name} / ${next.modelName ?? thread.modelName ?? currentModel}`,
+        }
+      };
+    });
   }
 
   async function handleFiles(fileList: FileList | null) {
@@ -1215,27 +1228,14 @@ function App() {
       const savedPersona = personaFromStored(saved);
       setDraftPersona(savedPersona);
       setBuilderMode("edit");
-      if (!shouldCreate && saved.id === activePersona.id) {
-        activateChatPersona(savedPersona);
-        setThreads((previous) =>
-          previous.map((thread) =>
-            thread.personaId === saved.id
-              ? {
-                  ...thread,
-                  personaName: savedPersona.name,
-                  provider: thread.provider || savedPersona.modelSettings.provider,
-                  modelName: thread.modelName || savedPersona.modelSettings.name,
-                  subtitle: `${savedPersona.name} / ${thread.modelName || savedPersona.modelSettings.name || DEFAULT_MODEL}`,
-                }
-              : thread,
-          ),
-        );
-      }
-      setSavedPersonas((previous) => {
-        const next = [saved, ...previous.filter((record) => record.id !== saved.id)];
-        mergeMeetingPersonas(next, saved.id);
+
+      // Update personasById
+      setPersonasById((prev) => {
+        const next = { ...prev, [saved.id]: saved };
+        mergeMeetingPersonas(Object.values(next), saved.id);
         return next;
       });
+
       setPersonaNotice(shouldCreate ? "Nieuwe persona gemaakt en links toegevoegd." : "Persona opgeslagen.");
     } catch (error) {
       setPersonaNotice(error instanceof Error ? error.message : "Persona opslaan mislukt.");
@@ -1245,7 +1245,7 @@ function App() {
   }
 
   function newPersonaDraft() {
-    const draftNumber = Math.max(1, savedPersonas.length + 1);
+    const draftNumber = Math.max(1, Object.keys(personasById).length + 1);
     setDraftPersona({
       ...defaultPersona(),
       id: undefined,
@@ -1272,19 +1272,19 @@ function App() {
     });
     setBuilderMode("create");
     setPersonaNotice("");
-    activateRail("persona");
+    activateRail("persona_builder");
   }
 
   function editStoredPersona(record: StoredPersona) {
     const nextPersona = personaFromStored(record);
     setDraftPersona(nextPersona);
     setBuilderMode("edit");
-    activateRail("persona");
+    setViewMode("persona_builder");
   }
 
   function chatWithPersona(record: StoredPersona) {
     const nextPersona = applyPersonaSelection(record);
-    setActiveRail("chat");
+    setViewMode("chat");
     void loadPersonaConversations(record.id, record.name, nextPersona.introduction);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
@@ -1297,13 +1297,13 @@ function App() {
 
   function useDraftInChat() {
     if (!draftPersona.id) return;
-    const record = savedPersonas.find((item) => item.id === draftPersona.id);
+    const record = personasById[draftPersona.id];
     if (record) {
       chatWithPersona(record);
       return;
     }
     activateChatPersona(draftPersona);
-    setActiveRail("chat");
+    setViewMode("chat");
     void loadPersonaConversations(draftPersona.id, draftPersona.name, draftPersona.introduction);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
@@ -1312,34 +1312,22 @@ function App() {
     if (selectedPersonaId) {
       mergeMeetingPersonas(savedPersonas, selectedPersonaId);
     }
-    const id = uid("meeting");
-    const thread: ChatThread = {
-      id,
-      kind: "meeting",
-      personaId: undefined,
-      personaName: "Meeting table",
-      provider: "ouroboros-chat",
-      modelName: "meeting",
-      title: "Meeting table",
-      subtitle: "Persona meeting",
-      updatedAt: nowIso(),
-    };
-    setThreads((previous) => [thread, ...previous]);
-    setMessagesByThread((previous) => ({
-      ...previous,
-      [id]: [
-        {
-          id: "meeting-welcome",
-          role: "assistant",
-          content: "Selecteer persona's aan de vergadertafel, kies een onderwerp en start de meeting. Agents kun je daarna als follow-up helpers aanvinken.",
-          createdAt: nowIso(),
-          status: "ready",
-          meta: { provider: "ouroboros-chat", model: "meeting", route: "meeting_table" },
-        },
-      ],
-    }));
-    setCurrentThreadId(id);
-    setActiveRail("meeting");
+    if (!activeMeetingId) {
+      const newId = uid("meeting");
+      setMeetingsById(prev => ({
+        ...prev,
+        [newId]: {
+          id: newId,
+          topic: "Review this thread and propose next actions.",
+          personaIds: [],
+          agentIds: [],
+          status: "draft",
+          updatedAt: nowIso(),
+        }
+      }));
+      setActiveMeetingId(newId);
+    }
+    setViewMode("meeting");
     window.setTimeout(() => meetingTopicRef.current?.focus(), 0);
   }
 
@@ -1349,24 +1337,26 @@ function App() {
       method: "POST",
     });
     const next = payload.persona;
-    setSavedPersonas((previous) => [next, ...previous]);
+    setPersonasById(prev => {
+      const p = { ...prev, [next.id]: next };
+      mergeMeetingPersonas(Object.values(p), next.id);
+      return p;
+    });
     const nextPersona = personaFromStored(next);
     setDraftPersona(nextPersona);
     setBuilderMode("edit");
-    mergeMeetingPersonas([next, ...savedPersonas], next.id);
     setPersonaNotice("Persona gedupliceerd.");
   }
 
   async function deletePersona() {
     if (!draftPersona.id || draftPersona.id === "ouroboros") return;
     await fetchJson(`/api/ouroboros-chat/personas/${encodeURIComponent(draftPersona.id)}`, { method: "DELETE" });
-    const next = savedPersonas.filter((record) => record.id !== draftPersona.id);
-    setSavedPersonas(next);
-    mergeMeetingPersonas(next);
-    if (draftPersona.id === activePersona.id) {
-      const fallbackPersona = next.length ? personaFromStored(next[0]) : defaultPersona();
-      activateChatPersona(fallbackPersona);
-    }
+    setPersonasById(prev => {
+      const p = { ...prev };
+      delete p[draftPersona.id!];
+      mergeMeetingPersonas(Object.values(p));
+      return p;
+    });
     setDraftPersona(defaultPersona());
     setBuilderMode("create");
     setPersonaNotice("Persona gearchiveerd.");
@@ -1394,11 +1384,15 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(imported),
       });
-      setSavedPersonas((previous) => [payload.persona, ...previous.filter((record) => record.id !== payload.persona.id)]);
+      const next = payload.persona;
+      setPersonasById(prev => {
+        const p = { ...prev, [next.id]: next };
+        mergeMeetingPersonas(Object.values(p), next.id);
+        return p;
+      });
       const importedPersona = personaFromStored(payload.persona);
       setDraftPersona(importedPersona);
       setBuilderMode("edit");
-      mergeMeetingPersonas([payload.persona, ...savedPersonas], payload.persona.id);
       setPersonaNotice("Persona geimporteerd.");
     } catch (error) {
       setPersonaNotice(error instanceof Error ? error.message : "Import mislukt.");
@@ -1452,7 +1446,7 @@ function App() {
       return;
     }
 
-    const threadId = currentThreadId;
+    const threadId = activeThreadId;
     const outgoingAttachments = attachments.filter((attachment) => attachment.status === "ready");
     const userMessage: ChatMessage = {
       id: uid("user"),
@@ -1484,10 +1478,18 @@ function App() {
     setAttachments([]);
     setIsSending(true);
     updateThreadAfterSend(threadId, text);
-    setMessagesByThread((previous) => ({
-      ...previous,
-      [threadId]: [...(previous[threadId] || []), userMessage, pendingMessage],
-    }));
+
+    setThreadsById((prev) => {
+      const thread = prev[threadId];
+      if (!thread) return prev;
+      return {
+        ...prev,
+        [threadId]: {
+          ...thread,
+          messages: [...thread.messages, userMessage, pendingMessage]
+        }
+      };
+    });
 
     try {
       const chatEndpoint = text.startsWith("/") ? "/api/cockpit/chat" : "/api/ouroboros-chat/chat";
@@ -1509,39 +1511,36 @@ function App() {
       });
 
       const responseText = extractResponseText(payload);
-      const responseMeta =
-        extractMeta(payload) || {
-          provider: currentProvider,
-          model: currentModel,
+      const responseMeta = extractMeta(payload) || { provider: currentProvider, model: currentModel };
+
+      setThreadsById((prev) => {
+        const thread = prev[threadId];
+        if (!thread) return prev;
+        return {
+          ...prev,
+          [threadId]: {
+            ...thread,
+            messages: thread.messages.map((message) =>
+              message.id === assistantId ? { ...message, content: responseText, status: "ready", meta: responseMeta } : message
+            )
+          }
         };
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [threadId]: (previous[threadId] || []).map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                content: responseText,
-                status: "ready",
-                meta: responseMeta,
-              }
-            : message,
-        ),
-      }));
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Chat request failed";
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [threadId]: (previous[threadId] || []).map((item) =>
-          item.id === assistantId
-            ? {
-                ...item,
-                content: message,
-                status: "error",
-                meta: { provider: currentProvider, model: currentModel, route: "error" },
-              }
-            : item,
-        ),
-      }));
+      setThreadsById((prev) => {
+        const thread = prev[threadId];
+        if (!thread) return prev;
+        return {
+          ...prev,
+          [threadId]: {
+            ...thread,
+            messages: thread.messages.map((item) =>
+              item.id === assistantId ? { ...item, content: message, status: "error", meta: { provider: currentProvider, model: currentModel, route: "error" } } : item
+            )
+          }
+        };
+      });
     } finally {
       setIsSending(false);
       window.setTimeout(() => composerRef.current?.focus(), 0);
@@ -1562,22 +1561,27 @@ function App() {
     const participants = selectedPersonaMembers.map((member) => member.id);
     if (!participants.length || meetingRunning) return;
     setMeetingRunning(true);
-    setActiveRail("meeting");
-    const assistantId = uid("meeting");
-    setMessagesByThread((previous) => ({
-      ...previous,
-      [currentThreadId]: [
-        ...(previous[currentThreadId] || []),
-        {
-          id: assistantId,
-          role: "assistant",
-          content: "",
-          createdAt: nowIso(),
-          status: "pending",
-          meta: { provider: "ouroboros-chat", model, route: "meeting" },
-        },
-      ],
+    setViewMode("meeting");
+
+    let meetingId = activeMeetingId;
+    if (!meetingId) {
+      meetingId = uid("meeting");
+      setActiveMeetingId(meetingId);
+    }
+
+    setMeetingsById((prev) => ({
+      ...prev,
+      [meetingId as string]: {
+        id: meetingId as string,
+        topic,
+        personaIds: participants,
+        agentIds: selectedAgentMembers.map((m) => m.id),
+        status: "running",
+        updatedAt: nowIso(),
+        transcript: "Meeting started... Waiting for responses...\n"
+      }
     }));
+
     try {
       const result = await fetchJson<Record<string, unknown>>("/api/ouroboros-chat/meetings", {
         method: "POST",
@@ -1606,23 +1610,26 @@ function App() {
         ? `\n\nFollow-up agents selected for tasks after the meeting: ${selectedAgentMembers.map((member) => member.handle).join(", ")}. Use the Agent task button to prepare an approval-gated task prompt.`
         : "";
       const content = `${notes || extractResponseText(result)}${agentFollowUp}`;
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [currentThreadId]: (previous[currentThreadId] || []).map((message) =>
-          message.id === assistantId
-            ? { ...message, content, status: "ready", meta: { provider: "ouroboros-chat", model, route: "meeting" } }
-            : message,
-        ),
+
+      setMeetingsById((prev) => ({
+        ...prev,
+        [meetingId as string]: {
+          ...prev[meetingId as string],
+          status: "completed",
+          transcript: content,
+          updatedAt: nowIso(),
+        }
       }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Meeting failed";
-      setMessagesByThread((previous) => ({
-        ...previous,
-        [currentThreadId]: (previous[currentThreadId] || []).map((item) =>
-          item.id === assistantId
-            ? { ...item, content: message, status: "error", meta: { provider: "ouroboros-chat", model, route: "meeting" } }
-            : item,
-        ),
+      setMeetingsById((prev) => ({
+        ...prev,
+        [meetingId as string]: {
+          ...prev[meetingId as string],
+          status: "error",
+          transcript: `Error: ${message}`,
+          updatedAt: nowIso(),
+        }
       }));
     } finally {
       setMeetingRunning(false);
@@ -1635,23 +1642,23 @@ function App() {
     );
   }
 
-  function activateRail(target: RailTarget) {
+  function activateRail(target: ViewMode) {
     if (target === "meeting") {
       openMeetingTable();
       return;
     }
-    if (target === "persona" && builderMode === null) {
-      setDraftPersona(activePersona);
-      setBuilderMode(activePersona.id ? "edit" : "create");
+    if (target === "persona_builder" && builderMode === null) {
+      setDraftPersona(currentChatPersona);
+      setBuilderMode(currentChatPersona.id ? "edit" : "create");
     }
-    setActiveRail(target);
+    setViewMode(target);
     window.setTimeout(() => {
       if (target === "chat") {
         threadEndRef.current?.scrollIntoView({ block: "end" });
         composerRef.current?.focus();
         return;
       }
-      if (target === "persona") {
+      if (target === "persona_builder") {
         personaPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         personaNameRef.current?.focus();
         return;
@@ -1662,14 +1669,14 @@ function App() {
   }
 
   return (
-    <div className={`app-shell ${activeRail !== "chat" ? "inspector-open" : ""}`}>
+    <div className={`app-shell ${viewMode !== "chat" ? "inspector-open" : ""}`}>
       <aside className="icon-rail" aria-label="Primary navigation">
         <div className="rail-brand" title="Ouroboros Chat">
           <img src={ouroborosLogo} alt="" />
         </div>
         <nav className="rail-nav">
           <button
-            className={`rail-button ${activeRail === "chat" ? "active" : ""}`}
+            className={`rail-button ${viewMode === "chat" ? "active" : ""}`}
             type="button"
             aria-label="Chat"
             title="Chat"
@@ -1678,7 +1685,7 @@ function App() {
             <MessageSquare size={22} />
           </button>
           <button
-            className={`rail-button ${activeRail === "meeting" ? "active" : ""}`}
+            className={`rail-button ${viewMode === "meeting" ? "active" : ""}`}
             type="button"
             aria-label="Meeting"
             title="Meeting"
@@ -1687,16 +1694,16 @@ function App() {
             <Users size={22} />
           </button>
           <button
-            className={`rail-button ${activeRail === "persona" ? "active" : ""}`}
+            className={`rail-button ${viewMode === "persona_builder" ? "active" : ""}`}
             type="button"
             aria-label="Persona"
             title="Persona"
-            onClick={() => activateRail("persona")}
+            onClick={() => activateRail("persona_builder")}
           >
             <Brain size={22} />
           </button>
           <button
-            className={`rail-button ${activeRail === "settings" ? "active" : ""}`}
+            className={`rail-button ${viewMode === "settings" ? "active" : ""}`}
             type="button"
             aria-label="Settings"
             title="Settings"
@@ -1778,17 +1785,21 @@ function App() {
         </div>
 
         <div className="thread-list">
-          {threads.map((thread) => (
-            <button
-              className={`thread-item ${thread.id === currentThreadId ? "active" : ""}`}
-              key={thread.id}
-              type="button"
-              onClick={() => void openConversation(thread.id)}
-            >
-              <span className="thread-title">{thread.title}</span>
-              <span className="thread-subtitle">{thread.subtitle}</span>
-            </button>
-          ))}
+          {threadIds.map((id) => {
+            const thread = threadsById[id];
+            if (!thread) return null;
+            return (
+              <button
+                className={`thread-item ${thread.id === activeThreadId ? "active" : ""}`}
+                key={thread.id}
+                type="button"
+                onClick={() => void openConversation(thread.id)}
+              >
+                <span className="thread-title">{thread.title}</span>
+                <span className="thread-subtitle">{thread.subtitle}</span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="sidebar-footer">
@@ -1984,7 +1995,7 @@ function App() {
       </main>
 
       <aside className="inspector" aria-label="Persona and meeting panels">
-        <section ref={personaPanelRef} className={`panel persona-panel ${activeRail === "persona" ? "active-panel" : ""}`}>
+        <section ref={personaPanelRef} className={`panel persona-panel ${viewMode === "persona_builder" ? "active-panel" : ""}`}>
           <div className="panel-heading">
             <div>
               <span className="eyebrow">Persona</span>
@@ -2199,6 +2210,9 @@ function App() {
             <button type="button" onClick={() => void useDraftInChat()} disabled={!draftPersona.id}>
               Use in chat
             </button>
+            <button type="button" onClick={() => { if (draftPersona.id) { seatPersonaAtMeeting(personasById[draftPersona.id] || draftPersona); } }} disabled={!draftPersona.id}>
+              Add to meeting
+            </button>
             <button type="button" onClick={() => void duplicatePersona()} disabled={!draftPersona.id}>
               Duplicate
             </button>
@@ -2239,7 +2253,7 @@ function App() {
           </div>
         </section>
 
-        <section ref={meetingPanelRef} className={`panel meeting-panel ${activeRail === "meeting" ? "active-panel" : ""}`}>
+        <section ref={meetingPanelRef} className={`panel meeting-panel ${viewMode === "meeting" ? "active-panel" : ""}`}>
           <div className="panel-heading">
             <div>
               <span className="eyebrow">Meeting</span>
@@ -2312,9 +2326,22 @@ function App() {
               <span>Agent task</span>
             </button>
           </div>
+          {activeMeetingId && meetingsById[activeMeetingId]?.transcript ? (
+            <div className="meeting-transcript">
+              <div className="panel-subheading">
+                <strong>Transcript</strong>
+              </div>
+              <textarea
+                readOnly
+                value={meetingsById[activeMeetingId].transcript}
+                rows={10}
+                style={{ width: "100%", marginTop: "8px" }}
+              />
+            </div>
+          ) : null}
         </section>
 
-        <section ref={statusPanelRef} className={`panel status-panel ${activeRail === "settings" ? "active-panel" : ""}`}>
+        <section ref={statusPanelRef} className={`panel status-panel ${viewMode === "settings" ? "active-panel" : ""}`}>
           <div className="metric-row">
             <span>Backend</span>
             <strong>{backendState.status}</strong>
