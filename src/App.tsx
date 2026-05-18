@@ -66,19 +66,45 @@ type ChatMessage = {
 
 type ChatThread = {
   id: string;
+  kind?: "chat" | "meeting";
+  personaId?: string;
+  personaName?: string;
+  provider?: string;
+  modelName?: string;
   title: string;
   subtitle: string;
   updatedAt: string;
+};
+
+type BackendConversation = {
+  id: string;
+  persona_id: string;
+  title: string;
+  messages?: Array<{ id?: string; role?: string; content?: string; created_at?: string; createdAt?: string }>;
+  updated_at?: string;
 };
 
 type Persona = {
   id?: string;
   name: string;
   description: string;
+  role: string;
+  introduction: string;
   tone: string;
+  language: string;
+  rules: string[];
   memoryMode: "off" | "light" | "full";
+  memoryEnabled: boolean;
   systemPrompt: string;
   model: string;
+  modelSettings: {
+    provider: string;
+    name: string;
+    temperature: number;
+    max_tokens: number;
+    fallback_model: string;
+  };
+  tools: Record<string, boolean>;
   avatar: {
     kind: "initials" | "image";
     color: string;
@@ -101,12 +127,32 @@ type StoredPersona = {
   id: string;
   name: string;
   description?: string;
+  role?: string;
+  introduction?: string;
   instructions?: string;
   system_prompt?: string;
+  tone?: string;
+  language?: string;
+  rules?: string[];
+  tools?: Record<string, boolean>;
+  memory?: { enabled?: boolean; scope?: string };
   model?: string;
+  model_settings?: Persona["modelSettings"];
   avatar?: Persona["avatar"];
   knowledge_files?: PersonaKnowledgeFile[];
   archived?: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type MemoryItem = {
+  id: string;
+  persona_id?: string | null;
+  scope: string;
+  content: string;
+  tags?: string[];
+  importance?: number;
+  updated_at?: string;
 };
 
 type SlashOption = {
@@ -123,6 +169,7 @@ type BackendState = {
 };
 
 type RailTarget = "chat" | "meeting" | "persona" | "settings";
+type BuilderMode = "create" | "edit" | null;
 
 type MeetingMember = {
   id: string;
@@ -152,6 +199,16 @@ type UploadResponse = {
     kind?: string;
     mime_type?: string;
   }>;
+};
+
+const DEFAULT_TOOLS: Record<string, boolean> = {
+  web_search: false,
+  file_search: true,
+  code_execution: false,
+  calendar_email: false,
+  local_shell: false,
+  image_generation: false,
+  document_generation: false,
 };
 
 const FALLBACK_SLASH_OPTIONS: SlashOption[] = [
@@ -207,8 +264,8 @@ const FALLBACK_SLASH_OPTIONS: SlashOption[] = [
 ];
 
 const INITIAL_MEMBERS: MeetingMember[] = [
-  { id: "codex", name: "Codex", handle: "/codex", selected: true, online: true, source: "agent" },
-  { id: "roo", name: "Roo", handle: "/roo", selected: true, online: true, source: "agent" },
+  { id: "codex", name: "Codex", handle: "/codex", selected: false, online: true, source: "agent" },
+  { id: "roo", name: "Roo", handle: "/roo", selected: false, online: true, source: "agent" },
   { id: "atlas", name: "Atlas", handle: "/atlas", selected: false, online: true, source: "agent" },
   { id: "deepseek", name: "DeepSeek", handle: "/deepseek", selected: false, online: true, source: "agent" },
 ];
@@ -262,12 +319,13 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
-function makeWelcomeMessage(): ChatMessage {
+function makeWelcomeMessage(personaName = "Ouroboros", introduction = ""): ChatMessage {
   return {
     id: "assistant-welcome",
     role: "assistant",
     content:
-      "Ouroboros Chat is connected to the local cockpit contract. Default motor: ollama / ouroboros:latest.",
+      introduction.trim() ||
+      `${personaName} is geselecteerd. Stel je vraag en deze persona antwoordt met de eigen instructies, kennis en memory-instellingen.`,
     createdAt: nowIso(),
     status: "ready",
     meta: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, route: "local_ui" },
@@ -420,18 +478,57 @@ function initials(name: string): string {
   return text.toUpperCase();
 }
 
+function slugId(value: string, fallback = "persona"): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 64);
+  return slug || fallback;
+}
+
+function timestampValue(value?: string): number {
+  const time = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
 function defaultPersona(): Persona {
   return {
     id: undefined,
     name: "Ouroboros",
     description: "Lokale Ouroboros persona",
+    role: "Local assistant",
+    introduction: "Ik ben Ouroboros, je lokale assistent.",
     tone: "Grounded, practical, inspectable",
+    language: "nl",
+    rules: [],
     memoryMode: "light",
+    memoryEnabled: true,
     systemPrompt:
       "Stay grounded, auditable, reversible, and safe. Treat symbolic language as metaphor unless the user explicitly asks for documentation tone.",
     model: DEFAULT_MODEL,
+    modelSettings: {
+      provider: DEFAULT_PROVIDER,
+      name: DEFAULT_MODEL,
+      temperature: 0.7,
+      max_tokens: 2000,
+      fallback_model: DEFAULT_MODEL,
+    },
+    tools: { ...DEFAULT_TOOLS },
     avatar: { kind: "initials", color: "#7bdcc3" },
     knowledgeFiles: [],
+  };
+}
+
+function neutralChatPersona(): Persona {
+  return {
+    ...defaultPersona(),
+    id: undefined,
+    name: "Ouroboros",
+    description: "Neutrale lokale Ouroboros chat",
+    role: "Local assistant",
+    introduction: "Nieuwe neutrale Ouroboros-chat. Kies links een persona als je met een specifiek profiel wilt praten.",
   };
 }
 
@@ -440,10 +537,23 @@ function personaFromStored(record: StoredPersona): Persona {
     id: record.id,
     name: record.name || "Ouroboros",
     description: record.description || "",
-    tone: "Grounded, practical, inspectable",
+    role: record.role || "",
+    introduction: record.introduction || "",
+    tone: record.tone || "Grounded, practical, inspectable",
+    language: record.language || "nl",
+    rules: Array.isArray(record.rules) ? record.rules : [],
     memoryMode: "light",
+    memoryEnabled: record.memory?.enabled !== false,
     systemPrompt: record.instructions || record.system_prompt || "",
     model: record.model || DEFAULT_MODEL,
+    modelSettings: {
+      provider: record.model_settings?.provider || DEFAULT_PROVIDER,
+      name: record.model_settings?.name || record.model || DEFAULT_MODEL,
+      temperature: Number(record.model_settings?.temperature ?? 0.7),
+      max_tokens: Number(record.model_settings?.max_tokens ?? 2000),
+      fallback_model: record.model_settings?.fallback_model || DEFAULT_MODEL,
+    },
+    tools: { ...DEFAULT_TOOLS, ...(record.tools || {}) },
     avatar: record.avatar?.kind === "image" || record.avatar?.kind === "initials"
       ? {
           kind: record.avatar.kind,
@@ -472,11 +582,14 @@ function memberFromPersona(record: StoredPersona, selected = false): MeetingMemb
 function composeSystemPrompt(persona: Persona): string {
   const parts = [
     persona.systemPrompt.trim(),
+    persona.role ? `Role: ${persona.role}` : "",
+    persona.introduction ? `Introduction: ${persona.introduction}` : "",
     persona.description ? `Description: ${persona.description}` : "",
+    persona.rules.length ? `Rules:\n${persona.rules.map((rule) => `- ${rule}`).join("\n")}` : "",
     persona.knowledgeFiles.length
       ? `Knowledge files available: ${persona.knowledgeFiles.map((file) => file.label || file.filename || file.path).join(", ")}.`
       : "",
-    `Persona: ${persona.name}. Tone: ${persona.tone}. Memory mode: ${persona.memoryMode}.`,
+    `Persona: ${persona.name}. Tone: ${persona.tone}. Language: ${persona.language}. Memory: ${persona.memoryEnabled ? persona.memoryMode : "off"}.`,
   ].filter(Boolean);
   return parts.join("\n");
 }
@@ -495,10 +608,14 @@ function App() {
     status: "checking",
     label: "checking",
   });
-  const [persona, setPersona] = useState<Persona>(() => defaultPersona());
+  const [activePersona, setActivePersona] = useState<Persona>(() => defaultPersona());
+  const [draftPersona, setDraftPersona] = useState<Persona>(() => defaultPersona());
+  const [builderMode, setBuilderMode] = useState<BuilderMode>(null);
   const [savedPersonas, setSavedPersonas] = useState<StoredPersona[]>([]);
   const [personaSaving, setPersonaSaving] = useState(false);
   const [personaNotice, setPersonaNotice] = useState("");
+  const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
+  const [memoryDraft, setMemoryDraft] = useState("");
   const [meetingRunning, setMeetingRunning] = useState(false);
   const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
   const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
@@ -506,6 +623,10 @@ function App() {
   const [threads, setThreads] = useState<ChatThread[]>([
     {
       id: INITIAL_THREAD_ID,
+      personaId: "ouroboros",
+      personaName: "Ouroboros",
+      provider: DEFAULT_PROVIDER,
+      modelName: DEFAULT_MODEL,
       title: "Local Ouroboros",
       subtitle: `${DEFAULT_PROVIDER} / ${DEFAULT_MODEL}`,
       updatedAt: nowIso(),
@@ -518,6 +639,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const knowledgeInputRef = useRef<HTMLInputElement>(null);
+  const importPersonaRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const personaPanelRef = useRef<HTMLElement>(null);
   const personaNameRef = useRef<HTMLInputElement>(null);
@@ -529,6 +651,9 @@ function App() {
 
   const messages = messagesByThread[currentThreadId] || [];
   const currentThread = threads.find((thread) => thread.id === currentThreadId) || threads[0];
+  const currentChatPersona = personaForThread(currentThread);
+  const currentProvider = currentThread?.provider || currentChatPersona.modelSettings.provider || provider || DEFAULT_PROVIDER;
+  const currentModel = currentThread?.modelName || currentChatPersona.modelSettings.name || currentChatPersona.model || model || DEFAULT_MODEL;
   const readyFilePaths = attachments
     .filter((attachment) => attachment.status === "ready" && attachment.path)
     .map((attachment) => String(attachment.path));
@@ -551,8 +676,17 @@ function App() {
   }, [prompt, slashOptions, slashQuery]);
 
   const slashVisible = (slashOpen || prompt.startsWith("/")) && filteredSlashOptions.length > 0;
-  const selectedMembers = meetingMembers.filter((member) => member.selected);
-  const personaAvatarSrc = persona.avatar.previewUrl || uploadUrl(persona.avatar.path, persona.avatar.filename);
+  const personaMeetingMembers = meetingMembers.filter((member) => member.source === "persona");
+  const agentMeetingMembers = meetingMembers.filter((member) => member.source === "agent");
+  const selectedPersonaMembers = personaMeetingMembers.filter((member) => member.selected);
+  const selectedAgentMembers = agentMeetingMembers.filter((member) => member.selected);
+  const draftPersonaAvatarSrc = draftPersona.avatar.previewUrl || uploadUrl(draftPersona.avatar.path, draftPersona.avatar.filename);
+  const builderTitle =
+    builderMode === "create"
+      ? "Create persona"
+      : builderMode === "edit"
+        ? `Edit ${draftPersona.name || "persona"}`
+        : "Persona builder";
 
   useEffect(() => {
     let cancelled = false;
@@ -601,31 +735,228 @@ function App() {
     setSlashIndex(0);
   }, [slashQuery, slashOptions.length]);
 
+  useEffect(() => {
+    if (draftPersona.id && builderMode === "edit") {
+      loadMemory(draftPersona.id).catch(() => setMemoryItems([]));
+    } else {
+      setMemoryItems([]);
+    }
+  }, [builderMode, draftPersona.id]);
+
   function mergeMeetingPersonas(personaRecords: StoredPersona[], selectedPersonaId?: string) {
     setMeetingMembers((previous) => {
       const previousSelected = new Map(previous.map((member) => [member.id, member.selected]));
       const personaMembers = personaRecords
         .filter((record) => !record.archived)
         .map((record) => memberFromPersona(record, previousSelected.get(record.id) ?? record.id === selectedPersonaId));
-      return [
-        ...INITIAL_MEMBERS.map((member) => ({
-          ...member,
-          selected: previousSelected.get(member.id) ?? member.selected,
-        })),
-        ...personaMembers,
-      ];
+      const agentMembers = INITIAL_MEMBERS.map((member) => ({
+        ...member,
+        selected: previousSelected.get(member.id) ?? member.selected,
+      }));
+      return [...personaMembers, ...agentMembers];
     });
+  }
+
+  function personaForId(personaId?: string, fallback = activePersona): Persona {
+    const record = savedPersonas.find((item) => item.id === personaId);
+    if (record) {
+      return personaFromStored(record);
+    }
+    if (!personaId || fallback.id === personaId) {
+      return fallback;
+    }
+    return {
+      ...defaultPersona(),
+      id: personaId,
+      name: personaId === "ouroboros" ? "Ouroboros" : personaId,
+    };
+  }
+
+  function personaForThread(thread?: ChatThread): Persona {
+    if (!thread) {
+      return activePersona;
+    }
+    if (!thread.personaId) {
+      return {
+        ...neutralChatPersona(),
+        name: thread.personaName || "Ouroboros",
+      };
+    }
+    const persona = personaForId(thread.personaId, activePersona);
+    if (persona.id === thread.personaId) {
+      return {
+        ...persona,
+        name: persona.name || thread.personaName || thread.personaId || "Ouroboros",
+      };
+    }
+    return {
+      ...persona,
+      id: thread.personaId || persona.id,
+      name: thread.personaName || persona.name,
+    };
+  }
+
+  function activateChatPersona(nextPersona: Persona) {
+    setActivePersona(nextPersona);
+    setProvider(nextPersona.modelSettings.provider || DEFAULT_PROVIDER);
+    setModel(nextPersona.modelSettings.name || nextPersona.model || DEFAULT_MODEL);
+  }
+
+  function mergeThreads(nextThreads: ChatThread[], options: { focusId?: string } = {}) {
+    setThreads((previous) => {
+      const byId = new Map(previous.map((thread) => [thread.id, thread]));
+      nextThreads.forEach((thread) => {
+        byId.set(thread.id, { ...(byId.get(thread.id) || {}), ...thread });
+      });
+      return Array.from(byId.values()).sort(
+        (left, right) => timestampValue(right.updatedAt) - timestampValue(left.updatedAt),
+      );
+    });
+    if (options.focusId) {
+      setCurrentThreadId(options.focusId);
+    }
   }
 
   async function loadPersonas() {
     const payload = await fetchJson<{ personas?: StoredPersona[] }>("/api/ouroboros-chat/personas");
-    const records = (payload.personas || []).filter((record) => record.id && !record.archived);
+    const records = (payload.personas || [])
+      .filter((record) => record.id && !record.archived)
+      .sort((left, right) => timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at));
     setSavedPersonas(records);
     mergeMeetingPersonas(records);
-    if (!persona.id && records.length) {
+    if (!activePersona.id && records.length) {
       const first = records.find((record) => record.id === "ouroboros") || records[0];
-      setPersona(personaFromStored(first));
+      const firstPersona = applyPersonaSelection(first);
+      void loadPersonaConversations(first.id, first.name, firstPersona.introduction);
     }
+  }
+
+  async function loadMemory(personaId: string) {
+    const payload = await fetchJson<{ memory?: MemoryItem[] }>(`/api/ouroboros-chat/memory?persona_id=${encodeURIComponent(personaId)}`);
+    setMemoryItems(payload.memory || []);
+  }
+
+  function applyPersonaSelection(record: StoredPersona): Persona {
+    const nextPersona = personaFromStored(record);
+    activateChatPersona(nextPersona);
+    setPersonaNotice("");
+    return nextPersona;
+  }
+
+  async function loadPersonaConversations(personaId: string, personaName = activePersona.name, personaIntro = "") {
+    const payload = await fetchJson<{ conversations?: BackendConversation[] }>(`/api/ouroboros-chat/conversations?persona_id=${encodeURIComponent(personaId)}`);
+    const conversations = payload.conversations || [];
+    const conversationPersona = personaForId(personaId);
+    if (!conversations.length) {
+      const existingThread = threads.find((thread) => thread.personaId === personaId);
+      if (existingThread) {
+        setCurrentThreadId(existingThread.id);
+        activateChatPersona(conversationPersona);
+        setMessagesByThread((previous) => ({
+          ...previous,
+          [existingThread.id]: previous[existingThread.id] || [makeWelcomeMessage(personaName, personaIntro)],
+        }));
+        return;
+      }
+      const id = uid("thread");
+      mergeThreads(
+        [
+          {
+            id,
+            personaId,
+            personaName,
+            provider: conversationPersona.modelSettings.provider,
+            modelName: conversationPersona.modelSettings.name,
+            title: "New thread",
+            subtitle: `${personaName} / ${conversationPersona.modelSettings.name || DEFAULT_MODEL}`,
+            updatedAt: nowIso(),
+          },
+        ],
+        { focusId: id },
+      );
+      setMessagesByThread((previous) => ({
+        ...previous,
+        [id]: previous[id] || [makeWelcomeMessage(personaName, personaIntro)],
+      }));
+      return;
+    }
+    const mapped = conversations.map((conversation) => ({
+      id: conversation.id,
+      personaId: conversation.persona_id,
+      personaName,
+      provider: conversationPersona.modelSettings.provider,
+      modelName: conversationPersona.modelSettings.name,
+      title: conversation.title || "Thread",
+      subtitle: `${personaName} / ${conversationPersona.modelSettings.name || DEFAULT_MODEL}`,
+      updatedAt: conversation.updated_at || nowIso(),
+    }));
+    mergeThreads(mapped, { focusId: mapped[0].id });
+    await openConversation(mapped[0].id);
+  }
+
+  async function openConversation(conversationId: string) {
+    setCurrentThreadId(conversationId);
+    try {
+      const payload = await fetchJson<{ conversation?: BackendConversation }>(`/api/ouroboros-chat/conversations/${encodeURIComponent(conversationId)}`);
+      const conversation = payload.conversation;
+      const fallbackThread = threads.find((thread) => thread.id === conversationId);
+      const personaId = conversation?.persona_id || fallbackThread?.personaId || activePersona.id || "ouroboros";
+      const threadPersona = personaForId(personaId);
+      activateChatPersona(threadPersona);
+      mergeThreads([
+        {
+          id: conversationId,
+          personaId,
+          personaName: threadPersona.name,
+          provider: threadPersona.modelSettings.provider,
+          modelName: threadPersona.modelSettings.name,
+          title: conversation?.title || fallbackThread?.title || "New thread",
+          subtitle: `${threadPersona.name} / ${threadPersona.modelSettings.name || DEFAULT_MODEL}`,
+          updatedAt: conversation?.updated_at || fallbackThread?.updatedAt || nowIso(),
+        },
+      ]);
+      const messages: ChatMessage[] = (payload.conversation?.messages || []).map((message) => ({
+        id: message.id || uid("message"),
+        role: message.role === "user" ? "user" : "assistant",
+        content: message.content || "",
+        createdAt: message.createdAt || message.created_at || nowIso(),
+        status: "ready",
+      }));
+      setMessagesByThread((previous) => ({
+        ...previous,
+        [conversationId]: messages.length ? messages : [makeWelcomeMessage(threadPersona.name, threadPersona.introduction)],
+      }));
+    } catch {
+      const fallbackThread = threads.find((thread) => thread.id === conversationId);
+      const threadPersona = personaForThread(fallbackThread);
+      activateChatPersona(threadPersona);
+      setMessagesByThread((previous) => ({
+        ...previous,
+        [conversationId]: previous[conversationId] || [makeWelcomeMessage(threadPersona.name, threadPersona.introduction)],
+      }));
+    }
+  }
+
+  async function addMemory() {
+    if (!draftPersona.id || !memoryDraft.trim()) return;
+    const payload = await fetchJson<{ memory: MemoryItem }>("/api/ouroboros-chat/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        persona_id: draftPersona.id,
+        scope: "persona",
+        content: memoryDraft.trim(),
+        importance: 3,
+        tags: ["manual"],
+      }),
+    });
+    setMemoryItems((previous) => [payload.memory, ...previous]);
+    setMemoryDraft("");
+  }
+
+  async function deleteMemory(memoryId: string) {
+    await fetchJson(`/api/ouroboros-chat/memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
+    setMemoryItems((previous) => previous.filter((item) => item.id !== memoryId));
   }
 
   function updateCurrentMessages(updater: (current: ChatMessage[]) => ChatMessage[]) {
@@ -639,16 +970,25 @@ function App() {
   }
 
   function startNewThread() {
+    const neutral = neutralChatPersona();
     const id = uid("thread");
     const thread: ChatThread = {
       id,
+      kind: "chat",
+      personaId: undefined,
+      personaName: neutral.name,
+      provider: DEFAULT_PROVIDER,
+      modelName: DEFAULT_MODEL,
       title: "New thread",
-      subtitle: `${provider} / ${model}`,
+      subtitle: `${neutral.name} / ${DEFAULT_MODEL}`,
       updatedAt: nowIso(),
     };
     setThreads((previous) => [thread, ...previous]);
-    setMessagesByThread((previous) => ({ ...previous, [id]: [makeWelcomeMessage()] }));
+    setMessagesByThread((previous) => ({ ...previous, [id]: [makeWelcomeMessage(neutral.name, neutral.introduction)] }));
     setCurrentThreadId(id);
+    activateChatPersona(neutral);
+    setProvider(DEFAULT_PROVIDER);
+    setModel(DEFAULT_MODEL);
     setPrompt("");
     setAttachments([]);
     setSlashOpen(false);
@@ -665,10 +1005,29 @@ function App() {
         return {
           ...thread,
           title: thread.title === "New thread" || thread.title === "Local Ouroboros" ? shortTitle || thread.title : thread.title,
-          subtitle: `${provider} / ${model}`,
+          personaId: currentChatPersona.id || thread.personaId,
+          personaName: currentChatPersona.name,
+          provider: currentProvider,
+          modelName: currentModel,
+          subtitle: `${currentChatPersona.name} / ${currentModel}`,
           updatedAt: nowIso(),
         };
       }),
+    );
+  }
+
+  function updateCurrentThreadSettings(next: { provider?: string; modelName?: string }) {
+    setThreads((previous) =>
+      previous.map((thread) =>
+        thread.id === currentThreadId
+          ? {
+              ...thread,
+              provider: next.provider ?? thread.provider,
+              modelName: next.modelName ?? thread.modelName,
+              subtitle: `${thread.personaName || currentChatPersona.name} / ${next.modelName ?? thread.modelName ?? currentModel}`,
+            }
+          : thread,
+      ),
     );
   }
 
@@ -759,7 +1118,7 @@ function App() {
         throw new Error(serverFile?.reason || serverFile?.error || "Avatar upload failed");
       }
       const previewUrl = URL.createObjectURL(file);
-      setPersona((current) => ({
+      setDraftPersona((current) => ({
         ...current,
         avatar: {
           kind: "image",
@@ -801,7 +1160,7 @@ function App() {
         const reason = result.files?.find((file) => file.reason || file.error);
         throw new Error(reason?.reason || reason?.error || "Geen kennisbestand opgeslagen.");
       }
-      setPersona((current) => ({
+      setDraftPersona((current) => ({
         ...current,
         knowledgeFiles: [...current.knowledgeFiles, ...uploaded],
       }));
@@ -814,41 +1173,70 @@ function App() {
   }
 
   function removePersonaKnowledge(path: string) {
-    setPersona((current) => ({
+    setDraftPersona((current) => ({
       ...current,
       knowledgeFiles: current.knowledgeFiles.filter((file) => file.path !== path),
     }));
   }
 
-  async function savePersona() {
-    if (!persona.name.trim() || personaSaving) return;
+  async function savePersona({ asNew = false }: { asNew?: boolean } = {}) {
+    if (!draftPersona.name.trim() || personaSaving) return;
     setPersonaSaving(true);
-    setPersonaNotice("Persona opslaan...");
+    setPersonaNotice(asNew ? "Nieuwe persona opslaan..." : "Persona opslaan...");
     try {
+      const shouldCreate = asNew || builderMode === "create" || !draftPersona.id;
+      const nextId = shouldCreate ? `${slugId(draftPersona.name)}-${Date.now().toString(36)}` : draftPersona.id;
       const payload = await fetchJson<{ persona: StoredPersona }>("/api/ouroboros-chat/personas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: persona.id,
-          name: persona.name,
-          description: persona.description,
-          instructions: persona.systemPrompt,
-          system_prompt: persona.systemPrompt,
-          model: persona.model || model || DEFAULT_MODEL,
-          avatar: persona.avatar,
-          knowledge_files: persona.knowledgeFiles,
-          capabilities: ["memory_search", "agentic_ecosystem_context", "read_file", "search_files"],
+          id: nextId,
+          name: draftPersona.name,
+          description: draftPersona.description,
+          role: draftPersona.role,
+          introduction: draftPersona.introduction,
+          instructions: draftPersona.systemPrompt,
+          system_prompt: draftPersona.systemPrompt,
+          tone: draftPersona.tone,
+          language: draftPersona.language,
+          rules: draftPersona.rules,
+          tools: draftPersona.tools,
+          memory: { enabled: draftPersona.memoryEnabled, scope: "persona" },
+          model: draftPersona.modelSettings.name || draftPersona.model || model || DEFAULT_MODEL,
+          model_settings: draftPersona.modelSettings,
+          avatar: draftPersona.avatar,
+          knowledge_files: draftPersona.knowledgeFiles,
+          knowledge_sources: draftPersona.knowledgeFiles,
+          capabilities: Object.entries(draftPersona.tools).filter(([, enabled]) => enabled).map(([key]) => key),
           tags: ["custom"],
         }),
       });
       const saved = payload.persona;
-      setPersona(personaFromStored(saved));
+      const savedPersona = personaFromStored(saved);
+      setDraftPersona(savedPersona);
+      setBuilderMode("edit");
+      if (!shouldCreate && saved.id === activePersona.id) {
+        activateChatPersona(savedPersona);
+        setThreads((previous) =>
+          previous.map((thread) =>
+            thread.personaId === saved.id
+              ? {
+                  ...thread,
+                  personaName: savedPersona.name,
+                  provider: thread.provider || savedPersona.modelSettings.provider,
+                  modelName: thread.modelName || savedPersona.modelSettings.name,
+                  subtitle: `${savedPersona.name} / ${thread.modelName || savedPersona.modelSettings.name || DEFAULT_MODEL}`,
+                }
+              : thread,
+          ),
+        );
+      }
       setSavedPersonas((previous) => {
         const next = [saved, ...previous.filter((record) => record.id !== saved.id)];
         mergeMeetingPersonas(next, saved.id);
         return next;
       });
-      setPersonaNotice("Persona opgeslagen en aan de vergadertafel gezet.");
+      setPersonaNotice(shouldCreate ? "Nieuwe persona gemaakt en links toegevoegd." : "Persona opgeslagen.");
     } catch (error) {
       setPersonaNotice(error instanceof Error ? error.message : "Persona opslaan mislukt.");
     } finally {
@@ -857,24 +1245,170 @@ function App() {
   }
 
   function newPersonaDraft() {
-    setPersona({
+    const draftNumber = Math.max(1, savedPersonas.length + 1);
+    setDraftPersona({
       ...defaultPersona(),
       id: undefined,
-      name: "Nieuwe persona",
+      name: `Nieuwe persona ${draftNumber}`,
       description: "",
+      role: "",
+      introduction: "",
+      tone: "Grounded, practical, inspectable",
+      language: "nl",
+      rules: [],
+      memoryEnabled: true,
       systemPrompt: "",
       model: model || DEFAULT_MODEL,
+      modelSettings: {
+        provider,
+        name: model || DEFAULT_MODEL,
+        temperature: 0.7,
+        max_tokens: 2000,
+        fallback_model: DEFAULT_MODEL,
+      },
+      tools: { ...DEFAULT_TOOLS },
       avatar: { kind: "initials", color: "#f2c97d" },
       knowledgeFiles: [],
     });
+    setBuilderMode("create");
     setPersonaNotice("");
     activateRail("persona");
   }
 
   function editStoredPersona(record: StoredPersona) {
-    setPersona(personaFromStored(record));
-    setPersonaNotice("");
+    const nextPersona = personaFromStored(record);
+    setDraftPersona(nextPersona);
+    setBuilderMode("edit");
     activateRail("persona");
+  }
+
+  function chatWithPersona(record: StoredPersona) {
+    const nextPersona = applyPersonaSelection(record);
+    setActiveRail("chat");
+    void loadPersonaConversations(record.id, record.name, nextPersona.introduction);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function seatPersonaAtMeeting(record: StoredPersona) {
+    mergeMeetingPersonas(savedPersonas, record.id);
+    openMeetingTable(record.id);
+    window.setTimeout(() => meetingTopicRef.current?.focus(), 0);
+  }
+
+  function useDraftInChat() {
+    if (!draftPersona.id) return;
+    const record = savedPersonas.find((item) => item.id === draftPersona.id);
+    if (record) {
+      chatWithPersona(record);
+      return;
+    }
+    activateChatPersona(draftPersona);
+    setActiveRail("chat");
+    void loadPersonaConversations(draftPersona.id, draftPersona.name, draftPersona.introduction);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function openMeetingTable(selectedPersonaId?: string) {
+    if (selectedPersonaId) {
+      mergeMeetingPersonas(savedPersonas, selectedPersonaId);
+    }
+    const id = uid("meeting");
+    const thread: ChatThread = {
+      id,
+      kind: "meeting",
+      personaId: undefined,
+      personaName: "Meeting table",
+      provider: "ouroboros-chat",
+      modelName: "meeting",
+      title: "Meeting table",
+      subtitle: "Persona meeting",
+      updatedAt: nowIso(),
+    };
+    setThreads((previous) => [thread, ...previous]);
+    setMessagesByThread((previous) => ({
+      ...previous,
+      [id]: [
+        {
+          id: "meeting-welcome",
+          role: "assistant",
+          content: "Selecteer persona's aan de vergadertafel, kies een onderwerp en start de meeting. Agents kun je daarna als follow-up helpers aanvinken.",
+          createdAt: nowIso(),
+          status: "ready",
+          meta: { provider: "ouroboros-chat", model: "meeting", route: "meeting_table" },
+        },
+      ],
+    }));
+    setCurrentThreadId(id);
+    setActiveRail("meeting");
+    window.setTimeout(() => meetingTopicRef.current?.focus(), 0);
+  }
+
+  async function duplicatePersona() {
+    if (!draftPersona.id) return;
+    const payload = await fetchJson<{ persona: StoredPersona }>(`/api/ouroboros-chat/personas/${encodeURIComponent(draftPersona.id)}/duplicate`, {
+      method: "POST",
+    });
+    const next = payload.persona;
+    setSavedPersonas((previous) => [next, ...previous]);
+    const nextPersona = personaFromStored(next);
+    setDraftPersona(nextPersona);
+    setBuilderMode("edit");
+    mergeMeetingPersonas([next, ...savedPersonas], next.id);
+    setPersonaNotice("Persona gedupliceerd.");
+  }
+
+  async function deletePersona() {
+    if (!draftPersona.id || draftPersona.id === "ouroboros") return;
+    await fetchJson(`/api/ouroboros-chat/personas/${encodeURIComponent(draftPersona.id)}`, { method: "DELETE" });
+    const next = savedPersonas.filter((record) => record.id !== draftPersona.id);
+    setSavedPersonas(next);
+    mergeMeetingPersonas(next);
+    if (draftPersona.id === activePersona.id) {
+      const fallbackPersona = next.length ? personaFromStored(next[0]) : defaultPersona();
+      activateChatPersona(fallbackPersona);
+    }
+    setDraftPersona(defaultPersona());
+    setBuilderMode("create");
+    setPersonaNotice("Persona gearchiveerd.");
+  }
+
+  async function exportPersona() {
+    if (!draftPersona.id) return;
+    const payload = await fetchJson<{ persona: StoredPersona }>(`/api/ouroboros-chat/personas/${encodeURIComponent(draftPersona.id)}/export`);
+    const blob = new Blob([JSON.stringify(payload.persona, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${draftPersona.id}.persona.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importPersona(fileList: FileList | null) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+    try {
+      const imported = JSON.parse(await file.text()) as StoredPersona;
+      const payload = await fetchJson<{ persona: StoredPersona }>("/api/ouroboros-chat/personas/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(imported),
+      });
+      setSavedPersonas((previous) => [payload.persona, ...previous.filter((record) => record.id !== payload.persona.id)]);
+      const importedPersona = personaFromStored(payload.persona);
+      setDraftPersona(importedPersona);
+      setBuilderMode("edit");
+      mergeMeetingPersonas([payload.persona, ...savedPersonas], payload.persona.id);
+      setPersonaNotice("Persona geimporteerd.");
+    } catch (error) {
+      setPersonaNotice(error instanceof Error ? error.message : "Import mislukt.");
+    } finally {
+      if (importPersonaRef.current) importPersonaRef.current.value = "";
+    }
+  }
+
+  function setTool(toolId: string, enabled: boolean) {
+    setDraftPersona((current) => ({ ...current, tools: { ...current.tools, [toolId]: enabled } }));
   }
 
   function selectSlashOption(option: SlashOption) {
@@ -935,10 +1469,14 @@ function App() {
       content: "",
       createdAt: nowIso(),
       status: "pending",
-      meta: { provider, model, route: "pending" },
+      meta: {
+        provider: currentProvider,
+        model: currentModel,
+        route: "pending",
+      },
     };
     const history = messages
-      .filter((message) => message.status !== "pending")
+      .filter((message) => message.status !== "pending" && message.id !== "assistant-welcome")
       .map((message) => ({ role: message.role, content: message.content }));
 
     setPrompt("");
@@ -957,20 +1495,25 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider,
-          model,
+          provider: currentProvider,
+          model: currentModel,
           prompt: text,
+          persona_id: currentChatPersona.id || currentThread?.personaId || undefined,
           conversation_id: threadId,
           history,
           files: readyFilePaths.length ? readyFilePaths : undefined,
-          system_prompt: composeSystemPrompt(persona),
-          role: persona.name,
+          system_prompt: currentChatPersona.id ? undefined : composeSystemPrompt(currentChatPersona),
+          role: currentChatPersona.name,
           include_tools: text.startsWith("/"),
         }),
       });
 
       const responseText = extractResponseText(payload);
-      const responseMeta = extractMeta(payload) || { provider, model };
+      const responseMeta =
+        extractMeta(payload) || {
+          provider: currentProvider,
+          model: currentModel,
+        };
       setMessagesByThread((previous) => ({
         ...previous,
         [threadId]: (previous[threadId] || []).map((message) =>
@@ -994,7 +1537,7 @@ function App() {
                 ...item,
                 content: message,
                 status: "error",
-                meta: { provider, model, route: "error" },
+                meta: { provider: currentProvider, model: currentModel, route: "error" },
               }
             : item,
         ),
@@ -1006,16 +1549,17 @@ function App() {
   }
 
   function insertMeetingPrompt() {
-    const handles = selectedMembers.map((member) => member.handle).join(", ");
+    const handles = selectedAgentMembers.map((member) => member.handle).join(", ");
+    const personaNames = selectedPersonaMembers.map((member) => member.name).join(", ");
     const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
-    setPrompt(`/agents ${topic} Participants: ${handles}`);
+    setPrompt(`/agents ${topic} Persona meeting: ${personaNames || "geen persona's geselecteerd"}. Follow-up agents: ${handles || "none"}.`);
     setSlashOpen(false);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
   async function startPersonaMeeting() {
     const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
-    const participants = selectedMembers.map((member) => member.id);
+    const participants = selectedPersonaMembers.map((member) => member.id);
     if (!participants.length || meetingRunning) return;
     setMeetingRunning(true);
     setActiveRail("meeting");
@@ -1058,7 +1602,10 @@ function App() {
         })
         .filter(Boolean)
         .join("\n\n");
-      const content = notes || extractResponseText(result);
+      const agentFollowUp = selectedAgentMembers.length
+        ? `\n\nFollow-up agents selected for tasks after the meeting: ${selectedAgentMembers.map((member) => member.handle).join(", ")}. Use the Agent task button to prepare an approval-gated task prompt.`
+        : "";
+      const content = `${notes || extractResponseText(result)}${agentFollowUp}`;
       setMessagesByThread((previous) => ({
         ...previous,
         [currentThreadId]: (previous[currentThreadId] || []).map((message) =>
@@ -1089,6 +1636,14 @@ function App() {
   }
 
   function activateRail(target: RailTarget) {
+    if (target === "meeting") {
+      openMeetingTable();
+      return;
+    }
+    if (target === "persona" && builderMode === null) {
+      setDraftPersona(activePersona);
+      setBuilderMode(activePersona.id ? "edit" : "create");
+    }
     setActiveRail(target);
     window.setTimeout(() => {
       if (target === "chat") {
@@ -1099,11 +1654,6 @@ function App() {
       if (target === "persona") {
         personaPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         personaNameRef.current?.focus();
-        return;
-      }
-      if (target === "meeting") {
-        meetingPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        meetingTopicRef.current?.focus();
         return;
       }
       statusPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1172,13 +1722,68 @@ function App() {
           </div>
         </div>
 
+        <div className="persona-sidebar-list">
+          <div className="sidebar-section-row">
+            <div className="sidebar-section-title">Persona's</div>
+            <button type="button" className="sidebar-add-persona" onClick={newPersonaDraft}>
+              <Plus size={13} />
+              <span>New</span>
+            </button>
+          </div>
+          <button type="button" className="persona-create-card" onClick={newPersonaDraft}>
+            <Plus size={16} />
+            <span>
+              <strong>Nieuwe persona</strong>
+              <small>Maak een eigen GPT-achtig profiel</small>
+            </span>
+          </button>
+          {savedPersonas.map((record) => (
+            <div
+              className={`persona-sidebar-item ${currentChatPersona.id === record.id ? "active" : ""}`}
+              key={record.id}
+            >
+              <button className="persona-sidebar-main" type="button" onClick={() => chatWithPersona(record)}>
+                <span className="saved-avatar">
+                  {record.avatar?.kind === "image" ? (
+                    <img src={uploadUrl(record.avatar.path, record.avatar.filename)} alt="" />
+                  ) : (
+                    initials(record.name)
+                  )}
+                </span>
+                <span>
+                  <strong>{record.name}</strong>
+                  <small>{record.role || record.description || record.id}</small>
+                </span>
+              </button>
+              <button
+                className="persona-sidebar-action"
+                type="button"
+                title="Aan vergadertafel"
+                aria-label={`${record.name} aan vergadertafel zetten`}
+                onClick={() => seatPersonaAtMeeting(record)}
+              >
+                <Users size={14} />
+              </button>
+              <button
+                className="persona-sidebar-action"
+                type="button"
+                title="Bewerken"
+                aria-label={`${record.name} bewerken`}
+                onClick={() => editStoredPersona(record)}
+              >
+                <Settings size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+
         <div className="thread-list">
           {threads.map((thread) => (
             <button
               className={`thread-item ${thread.id === currentThreadId ? "active" : ""}`}
               key={thread.id}
               type="button"
-              onClick={() => setCurrentThreadId(thread.id)}
+              onClick={() => void openConversation(thread.id)}
             >
               <span className="thread-title">{thread.title}</span>
               <span className="thread-subtitle">{thread.subtitle}</span>
@@ -1201,7 +1806,13 @@ function App() {
           <div className="chat-controls" aria-label="Model controls">
             <label className="compact-field">
               <span>Provider</span>
-              <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+              <select
+                value={currentProvider}
+                onChange={(event) => {
+                  setProvider(event.target.value);
+                  updateCurrentThreadSettings({ provider: event.target.value });
+                }}
+              >
                 <option value="ollama">ollama</option>
                 <option value="ouroboros">ouroboros</option>
                 <option value="roo">roo</option>
@@ -1212,7 +1823,14 @@ function App() {
             </label>
             <label className="compact-field model-field">
               <span>Model</span>
-              <input ref={modelInputRef} value={model} onChange={(event) => setModel(event.target.value)} />
+              <input
+                ref={modelInputRef}
+                value={currentModel}
+                onChange={(event) => {
+                  setModel(event.target.value);
+                  updateCurrentThreadSettings({ modelName: event.target.value });
+                }}
+              />
             </label>
           </div>
         </header>
@@ -1225,7 +1843,7 @@ function App() {
               </div>
               <div className="message-bubble">
                 <div className="message-meta">
-                  <span>{message.role === "assistant" ? persona.name : "You"}</span>
+                  <span>{message.role === "assistant" ? currentChatPersona.name : "You"}</span>
                   <span>{formatTime(message.createdAt)}</span>
                   {message.meta?.route ? <span>{message.meta.route}</span> : null}
                 </div>
@@ -1370,7 +1988,7 @@ function App() {
           <div className="panel-heading">
             <div>
               <span className="eyebrow">Persona</span>
-              <h2>{persona.name}</h2>
+              <h2>{builderTitle}</h2>
             </div>
             <button className="mini-action" type="button" onClick={newPersonaDraft} title="Nieuwe persona">
               <Plus size={16} />
@@ -1382,17 +2000,17 @@ function App() {
               type="button"
               onClick={() => avatarInputRef.current?.click()}
               title="Avatar kiezen"
-              style={{ backgroundColor: persona.avatar.kind === "initials" ? persona.avatar.color : undefined }}
+              style={{ backgroundColor: draftPersona.avatar.kind === "initials" ? draftPersona.avatar.color : undefined }}
             >
-              {persona.avatar.kind === "image" && personaAvatarSrc ? (
-                <img src={personaAvatarSrc} alt="" />
+              {draftPersona.avatar.kind === "image" && draftPersonaAvatarSrc ? (
+                <img src={draftPersonaAvatarSrc} alt="" />
               ) : (
-                <span>{initials(persona.name)}</span>
+                <span>{initials(draftPersona.name)}</span>
               )}
             </button>
             <div>
-              <strong>{persona.avatar.kind === "image" ? persona.avatar.filename || "Avatar" : "Initialen"}</strong>
-              <span>{persona.knowledgeFiles.length} kennisbestand(en)</span>
+              <strong>{draftPersona.avatar.kind === "image" ? draftPersona.avatar.filename || "Avatar" : "Initialen"}</strong>
+              <span>{draftPersona.knowledgeFiles.length} kennisbestand(en)</span>
             </div>
             <input
               ref={avatarInputRef}
@@ -1404,26 +2022,79 @@ function App() {
           </div>
           <label className="field">
             <span>Name</span>
-            <input ref={personaNameRef} value={persona.name} onChange={(event) => setPersona({ ...persona, name: event.target.value })} />
+            <input ref={personaNameRef} value={draftPersona.name} onChange={(event) => setDraftPersona({ ...draftPersona, name: event.target.value })} />
           </label>
           <label className="field">
             <span>Description</span>
-            <input value={persona.description} onChange={(event) => setPersona({ ...persona, description: event.target.value })} />
+            <input value={draftPersona.description} onChange={(event) => setDraftPersona({ ...draftPersona, description: event.target.value })} />
+          </label>
+          <label className="field">
+            <span>Role / purpose</span>
+            <input value={draftPersona.role} onChange={(event) => setDraftPersona({ ...draftPersona, role: event.target.value })} />
+          </label>
+          <label className="field">
+            <span>Introduction</span>
+            <input value={draftPersona.introduction} onChange={(event) => setDraftPersona({ ...draftPersona, introduction: event.target.value })} />
           </label>
           <label className="field">
             <span>Tone</span>
-            <input value={persona.tone} onChange={(event) => setPersona({ ...persona, tone: event.target.value })} />
+            <input value={draftPersona.tone} onChange={(event) => setDraftPersona({ ...draftPersona, tone: event.target.value })} />
+          </label>
+          <label className="field">
+            <span>Language</span>
+            <input value={draftPersona.language} onChange={(event) => setDraftPersona({ ...draftPersona, language: event.target.value })} />
           </label>
           <label className="field">
             <span>Model</span>
-            <input value={persona.model} onChange={(event) => setPersona({ ...persona, model: event.target.value })} />
+            <input
+              value={draftPersona.modelSettings.name}
+              onChange={(event) =>
+                setDraftPersona({
+                  ...draftPersona,
+                  model: event.target.value,
+                  modelSettings: { ...draftPersona.modelSettings, name: event.target.value },
+                })
+              }
+            />
           </label>
+          <div className="two-col-fields">
+            <label className="field">
+              <span>Provider</span>
+              <select
+                value={draftPersona.modelSettings.provider}
+                onChange={(event) => setDraftPersona({ ...draftPersona, modelSettings: { ...draftPersona.modelSettings, provider: event.target.value } })}
+              >
+                <option value="ollama">ollama</option>
+                <option value="openai">openai</option>
+                <option value="anthropic">anthropic</option>
+                <option value="google">google</option>
+                <option value="local">local</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Temperature</span>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                max="2"
+                value={draftPersona.modelSettings.temperature}
+                onChange={(event) =>
+                  setDraftPersona({ ...draftPersona, modelSettings: { ...draftPersona.modelSettings, temperature: Number(event.target.value) } })
+                }
+              />
+            </label>
+          </div>
           <label className="field">
             <span>Memory</span>
             <select
-              value={persona.memoryMode}
+              value={draftPersona.memoryEnabled ? draftPersona.memoryMode : "off"}
               onChange={(event) =>
-                setPersona({ ...persona, memoryMode: event.target.value as Persona["memoryMode"] })
+                setDraftPersona({
+                  ...draftPersona,
+                  memoryEnabled: event.target.value !== "off",
+                  memoryMode: event.target.value as Persona["memoryMode"],
+                })
               }
             >
               <option value="off">off</option>
@@ -1432,13 +2103,60 @@ function App() {
             </select>
           </label>
           <label className="field">
+            <span>Rules</span>
+            <textarea
+              value={draftPersona.rules.join("\n")}
+              onChange={(event) => setDraftPersona({ ...draftPersona, rules: event.target.value.split("\n").map((line) => line.trim()).filter(Boolean) })}
+              rows={3}
+            />
+          </label>
+          <label className="field">
             <span>Instruction prompt</span>
             <textarea
-              value={persona.systemPrompt}
-              onChange={(event) => setPersona({ ...persona, systemPrompt: event.target.value })}
+              value={draftPersona.systemPrompt}
+              onChange={(event) => setDraftPersona({ ...draftPersona, systemPrompt: event.target.value })}
               rows={5}
             />
           </label>
+          <div className="tool-grid">
+            <div className="panel-subheading">
+              <strong>Tools</strong>
+            </div>
+            {Object.entries(draftPersona.tools).map(([toolId, enabled]) => (
+              <label className="tool-toggle" key={toolId}>
+                <input type="checkbox" checked={enabled} onChange={(event) => setTool(toolId, event.target.checked)} />
+                <span>{toolId.replace(/_/g, " ")}</span>
+              </label>
+            ))}
+          </div>
+          <div className="memory-block">
+            <div className="panel-subheading">
+              <strong>Memory</strong>
+              <button className="mini-action" type="button" onClick={() => void addMemory()} title="Memory opslaan" disabled={!draftPersona.id}>
+                <Plus size={15} />
+              </button>
+            </div>
+            <textarea
+              value={memoryDraft}
+              onChange={(event) => setMemoryDraft(event.target.value)}
+              placeholder="Stable fact, preference, project context..."
+              rows={2}
+            />
+            <div className="memory-list">
+              {memoryItems.length ? (
+                memoryItems.slice(0, 6).map((item) => (
+                  <div className="memory-item" key={item.id}>
+                    <span>{item.content}</span>
+                    <button type="button" onClick={() => void deleteMemory(item.id)} aria-label="Delete memory">
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <span className="empty-note">Geen persona-memory</span>
+              )}
+            </div>
+          </div>
           <div className="knowledge-block">
             <div className="panel-subheading">
               <strong>Kennis</strong>
@@ -1455,8 +2173,8 @@ function App() {
               />
             </div>
             <div className="knowledge-list">
-              {persona.knowledgeFiles.length ? (
-                persona.knowledgeFiles.map((file) => (
+              {draftPersona.knowledgeFiles.length ? (
+                draftPersona.knowledgeFiles.map((file) => (
                   <div className="knowledge-file" key={file.path}>
                     <FileText size={15} />
                     <span>{file.label || file.filename || file.path}</span>
@@ -1472,8 +2190,35 @@ function App() {
           </div>
           <button className="meeting-action" type="button" onClick={() => void savePersona()} disabled={personaSaving}>
             {personaSaving ? <Loader2 size={17} /> : <Check size={17} />}
-            <span>{persona.id ? "Update persona" : "Create persona"}</span>
+            <span>{builderMode === "edit" && draftPersona.id ? "Save changes" : "Create persona"}</span>
           </button>
+          <div className="persona-actions">
+            <button type="button" onClick={() => void savePersona({ asNew: true })} disabled={personaSaving}>
+              Save as new
+            </button>
+            <button type="button" onClick={() => void useDraftInChat()} disabled={!draftPersona.id}>
+              Use in chat
+            </button>
+            <button type="button" onClick={() => void duplicatePersona()} disabled={!draftPersona.id}>
+              Duplicate
+            </button>
+            <button type="button" onClick={() => void exportPersona()} disabled={!draftPersona.id}>
+              Export
+            </button>
+            <button type="button" onClick={() => importPersonaRef.current?.click()}>
+              Import
+            </button>
+            <button type="button" onClick={() => void deletePersona()} disabled={!draftPersona.id || draftPersona.id === "ouroboros"}>
+              Delete
+            </button>
+            <input
+              ref={importPersonaRef}
+              className="file-input"
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => void importPersona(event.target.files)}
+            />
+          </div>
           {personaNotice ? <div className="persona-notice">{personaNotice}</div> : null}
           <div className="saved-personas">
             {savedPersonas.map((record) => (
@@ -1498,7 +2243,7 @@ function App() {
           <div className="panel-heading">
             <div>
               <span className="eyebrow">Meeting</span>
-              <h2>Agent table</h2>
+              <h2>Persona table</h2>
             </div>
             <Users size={18} />
           </div>
@@ -1507,13 +2252,17 @@ function App() {
             <textarea ref={meetingTopicRef} value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} rows={3} />
           </label>
           <div className="member-list">
-            {meetingMembers.map((member) => (
+            <div className="member-section-label">
+              <span>Persona's</span>
+              <small>{selectedPersonaMembers.length} selected</small>
+            </div>
+            {personaMeetingMembers.length ? personaMeetingMembers.map((member) => (
               <button
                 className={`member-row ${member.selected ? "selected" : ""}`}
                 key={member.id}
-              type="button"
-              onClick={() => toggleMeetingMember(member.id)}
-            >
+                type="button"
+                onClick={() => toggleMeetingMember(member.id)}
+              >
                 <span
                   className={`member-avatar ${member.online ? "online" : ""}`}
                   style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
@@ -1526,20 +2275,41 @@ function App() {
                 </span>
                 <span>
                   <strong>{member.name}</strong>
-                  <small>{member.source === "persona" ? "persona" : member.handle}</small>
+                  <small>persona</small>
+                </span>
+                {member.selected ? <Check size={16} /> : <Plus size={16} />}
+              </button>
+            )) : <span className="empty-note">Maak eerst een persona aan.</span>}
+            <div className="member-section-label secondary">
+              <span>Agents voor vervolgtaken</span>
+              <small>{selectedAgentMembers.length} selected</small>
+            </div>
+            {agentMeetingMembers.map((member) => (
+              <button
+                className={`member-row secondary ${member.selected ? "selected" : ""}`}
+                key={member.id}
+                type="button"
+                onClick={() => toggleMeetingMember(member.id)}
+              >
+                <span className={`member-avatar ${member.online ? "online" : ""}`}>
+                  {initials(member.name)}
+                </span>
+                <span>
+                  <strong>{member.name}</strong>
+                  <small>{member.handle}</small>
                 </span>
                 {member.selected ? <Check size={16} /> : <Plus size={16} />}
               </button>
             ))}
           </div>
           <div className="meeting-actions">
-            <button className="meeting-action" type="button" onClick={() => void startPersonaMeeting()} disabled={meetingRunning || selectedMembers.length === 0}>
+            <button className="meeting-action" type="button" onClick={() => void startPersonaMeeting()} disabled={meetingRunning || selectedPersonaMembers.length === 0}>
               {meetingRunning ? <Loader2 size={17} /> : <Users size={17} />}
               <span>Start meeting</span>
             </button>
             <button className="meeting-action secondary" type="button" onClick={insertMeetingPrompt}>
               <Sparkles size={17} />
-              <span>Prompt</span>
+              <span>Agent task</span>
             </button>
           </div>
         </section>
@@ -1559,7 +2329,7 @@ function App() {
           </div>
           <div className="metric-row">
             <span>Table</span>
-            <strong>{selectedMembers.length}</strong>
+            <strong>{selectedPersonaMembers.length}</strong>
           </div>
           <div className="voice-row">
             <Mic size={16} />
