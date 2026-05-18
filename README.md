@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦅 Ouroboros AI chat
+# ⭕ Ouroboros AI chat
 **The Sovereign, Local-First Digital Guardian**
 
 [![Local-First](https://img.shields.io/badge/Architecture-Local--First-0059b3.svg)](#)
