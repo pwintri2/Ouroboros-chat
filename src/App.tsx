@@ -232,6 +232,13 @@ type MeetingMember = {
   avatar?: Persona["avatar"];
 };
 
+type MeetingTextBlock =
+  | { type: "heading"; text: string }
+  | { type: "paragraph"; text: string }
+  | { type: "keyValue"; label: string; text: string }
+  | { type: "bulletList"; items: string[] }
+  | { type: "numberedList"; items: string[] };
+
 type UploadResponse = {
   files?: Array<{
     filename?: string;
@@ -796,6 +803,144 @@ function meetingTranscriptFromRounds(rounds: MeetingRound[], summary: string): s
   return [body, summary ? `Consensus & Actiepunten:\n${summary}` : ""].filter(Boolean).join("\n\n---\n\n");
 }
 
+function cleanMeetingText(value: string): string {
+  return value
+    .replace(/^\s*[-*]\s*\*\*(.+?)\*\*:\s*/u, "$1: ")
+    .replace(/^\s*\*\*(.+?)\*\*\s*$/u, "$1")
+    .replace(/^\s*\*\*(.+?)\*\*:\s*/u, "$1: ")
+    .trim();
+}
+
+function parseMeetingKeyValue(line: string): { label: string; text: string } | null {
+  if (line.includes("://")) return null;
+  const match = line.match(/^([^:：]{3,48})[:：]\s+(.+)$/u);
+  if (!match) return null;
+  const label = cleanMeetingText(match[1]);
+  const text = cleanMeetingText(match[2]);
+  if (!label || !text) return null;
+  return { label, text };
+}
+
+function parseMeetingText(text: string): MeetingTextBlock[] {
+  const lines = text.split(/\r?\n/u);
+  const blocks: MeetingTextBlock[] = [];
+  let paragraph: string[] = [];
+  let list: Extract<MeetingTextBlock, { type: "bulletList" | "numberedList" }> | null = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push({ type: "paragraph", text: paragraph.join(" ") });
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (!list) return;
+    blocks.push(list);
+    list = null;
+  };
+
+  for (const rawLine of lines) {
+    const line = cleanMeetingText(rawLine);
+    if (!line) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^#{1,4}\s+(.+)$/u);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", text: cleanMeetingText(heading[1]) });
+      continue;
+    }
+
+    const bullet = line.match(/^(?:[-*•])\s+(.+)$/u);
+    if (bullet) {
+      flushParagraph();
+      if (!list || list.type !== "bulletList") {
+        flushList();
+        list = { type: "bulletList", items: [] };
+      }
+      list.items.push(cleanMeetingText(bullet[1]));
+      continue;
+    }
+
+    const numbered = line.match(/^\d+[\.)]\s+(.+)$/u);
+    if (numbered) {
+      flushParagraph();
+      if (!list || list.type !== "numberedList") {
+        flushList();
+        list = { type: "numberedList", items: [] };
+      }
+      list.items.push(cleanMeetingText(numbered[1]));
+      continue;
+    }
+
+    const keyValue = parseMeetingKeyValue(line);
+    if (keyValue) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "keyValue", ...keyValue });
+      continue;
+    }
+
+    if (line.endsWith(":") && line.length <= 72 && !line.includes("://")) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", text: line.slice(0, -1).trim() });
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+  return blocks.length ? blocks : [{ type: "paragraph", text: text.trim() }];
+}
+
+function StructuredMeetingText({ text, summary = false }: { text: string; summary?: boolean }) {
+  const blocks = parseMeetingText(text);
+  return (
+    <div className={`structured-meeting-text ${summary ? "summary-text" : ""}`}>
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          return <h3 key={`${block.type}-${index}`}>{block.text}</h3>;
+        }
+        if (block.type === "keyValue") {
+          return (
+            <div className="meeting-kv" key={`${block.type}-${index}`}>
+              <strong>{block.label}</strong>
+              <span>{block.text}</span>
+            </div>
+          );
+        }
+        if (block.type === "bulletList") {
+          return (
+            <ul key={`${block.type}-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${itemIndex}-${item}`}>{item}</li>
+              ))}
+            </ul>
+          );
+        }
+        if (block.type === "numberedList") {
+          return (
+            <ol key={`${block.type}-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${itemIndex}-${item}`}>{item}</li>
+              ))}
+            </ol>
+          );
+        }
+        return <p key={`${block.type}-${index}`}>{block.text}</p>;
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -926,6 +1071,8 @@ function App() {
   const agentMeetingMembers = meetingMembers.filter((member) => member.source === "agent");
   const selectedPersonaMembers = personaMeetingMembers.filter((member) => member.selected);
   const selectedAgentMembers = agentMeetingMembers.filter((member) => member.selected);
+  const activeSpeakerIds = (activeMeeting?.personaIds.length ? activeMeeting.personaIds : selectedPersonaMembers.map((member) => member.id)).filter(Boolean);
+  const activeSpeakerKey = activeSpeakerIds.join("|");
   const draftPersonaAvatarSrc = draftPersona.avatar.previewUrl || uploadUrl(draftPersona.avatar.path, draftPersona.avatar.filename);
   const builderTitle =
     builderMode === "create"
@@ -933,6 +1080,20 @@ function App() {
       : builderMode === "edit"
         ? `Edit ${draftPersona.name || "persona"}`
         : "Persona builder";
+
+  useEffect(() => {
+    if (!meetingRunning) return;
+    const ids = activeSpeakerKey.split("|").filter(Boolean);
+    if (!ids.length) return;
+    setThinkingPersonaId((current) => (current && ids.includes(current) ? current : ids[0]));
+    const timer = window.setInterval(() => {
+      setThinkingPersonaId((current) => {
+        const index = current ? ids.indexOf(current) : -1;
+        return ids[(index + 1) % ids.length] || ids[0];
+      });
+    }, 2600);
+    return () => window.clearInterval(timer);
+  }, [activeSpeakerKey, meetingRunning]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2048,6 +2209,7 @@ function App() {
     const meeting = activeMeeting;
     const activeParticipantMembers = (meeting?.participants || []).map((record) => memberFromPersona(record, true));
     const participantBarMembers = selectedPersonaMembers.length ? selectedPersonaMembers : activeParticipantMembers;
+    const activeSpeaker = participantBarMembers.find((member) => member.id === thinkingPersonaId);
     const rounds = meeting?.rounds || [];
     const summary = meeting?.summary || "";
     const canStart = selectedPersonaMembers.length > 0 && !meetingRunning;
@@ -2117,6 +2279,7 @@ function App() {
                   onClick={() => toggleMeetingMember(member.id)}
                   title={member.name}
                 >
+                  <span className={`speaker-lamp ${thinkingPersonaId === member.id ? "live" : ""}`} aria-hidden="true" />
                   <span
                     className={`member-avatar ${member.online ? "online" : ""}`}
                     style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
@@ -2129,7 +2292,7 @@ function App() {
                   </span>
                   <span>
                     <strong>{member.name}</strong>
-                    <small>{thinkingPersonaId === member.id ? "thinking" : "persona"}</small>
+                    <small>{thinkingPersonaId === member.id ? "aan het woord" : "persona"}</small>
                   </span>
                 </button>
               ))
@@ -2226,23 +2389,32 @@ function App() {
                   <span>running</span>
                 </div>
                 <div className="pending-line">
+                  <span className="speaker-lamp live" aria-hidden="true" />
                   <Loader2 size={16} />
-                  <span>Persona's denken sequentieel</span>
+                  <span>{activeSpeaker ? `${activeSpeaker.name} is aan het woord` : "Persona's denken sequentieel"}</span>
                 </div>
               </article>
             ) : null}
             {rounds.length ? (
-              rounds.map((round) => (
-                <article className="meeting-turn" key={round.id}>
-                  <div className="message-meta">
-                    <span>{round.participantName}</span>
-                    <span>{round.round ? `Ronde ${round.round}` : round.phase}</span>
-                    {round.role ? <span>{round.role}</span> : null}
-                    {round.tone ? <span>{round.tone}</span> : null}
-                  </div>
-                  <p>{round.content}</p>
-                </article>
-              ))
+              rounds.map((round) => {
+                const isActiveSpeaker = meetingRunning && thinkingPersonaId === round.participantId;
+                return (
+                  <article className={`meeting-turn ${isActiveSpeaker ? "speaking" : ""}`} key={round.id}>
+                    <header className="meeting-turn-header">
+                      <div className="meeting-speaker">
+                        <span className={`speaker-lamp ${isActiveSpeaker ? "live" : "resting"}`} aria-hidden="true" />
+                        <div className="message-meta">
+                          <span>{round.participantName}</span>
+                          <span>{round.round ? `Ronde ${round.round}` : round.phase}</span>
+                          {round.role ? <span>{round.role}</span> : null}
+                          {round.tone ? <span>{round.tone}</span> : null}
+                        </div>
+                      </div>
+                    </header>
+                    <StructuredMeetingText text={round.content} />
+                  </article>
+                );
+              })
             ) : !meetingRunning ? (
               <article className="meeting-turn empty">
                 <div className="message-meta">
@@ -2258,7 +2430,7 @@ function App() {
                   <span>Consensus & Actiepunten</span>
                   {meeting?.backendMeetingId ? <span>{meeting.backendMeetingId}</span> : null}
                 </div>
-                <p>{summary}</p>
+                <StructuredMeetingText text={summary} summary />
               </article>
             ) : null}
             {meeting?.error ? (
