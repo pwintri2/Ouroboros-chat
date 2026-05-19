@@ -179,10 +179,11 @@ type BackendState = {
   label: string;
 };
 
-type ViewMode = "chat" | "persona_builder" | "meeting" | "settings";
+type ViewMode = "chat" | "persona_builder" | "meeting" | "development_team" | "settings";
 type BuilderMode = "create" | "edit" | null;
 type ThreadType = "neutral" | "persona";
 type MeetingStatus = "draft" | "running" | "completed" | "error";
+type MeetingType = "team" | "sprint_planning" | "brainstorm";
 
 type MeetingRound = {
   id: string;
@@ -200,6 +201,7 @@ type Meeting = {
   id: string;
   backendMeetingId?: string;
   topic: string;
+  meetingType: MeetingType;
   participants: StoredPersona[];
   personaIds: string[];
   agentIds: string[];
@@ -215,11 +217,34 @@ type Meeting = {
 type SavedMeetingRecord = {
   meeting_id: string;
   topic?: string;
+  meeting_type?: MeetingType;
   status?: string;
   summary?: string;
   updated_at?: string;
   participants?: Array<{ id?: string; name?: string; role?: string }>;
   agent_ids?: string[];
+};
+
+type DevelopmentTeamRound = {
+  id: string;
+  phase: string;
+  participantId?: string;
+  participantName: string;
+  content: string;
+  createdAt: string;
+};
+
+type DevelopmentTeamResult = {
+  status: string;
+  execution?: string;
+  approval_required?: boolean;
+  approval_phrase?: string;
+  provider?: string;
+  model?: string;
+  agent_command?: string;
+  slash_prompt?: string;
+  safety_note?: string;
+  rounds?: DevelopmentTeamRound[];
 };
 
 type MeetingMember = {
@@ -400,6 +425,12 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
 ];
 
 const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-ontwerper", "de-criticus"];
+const MEETING_TYPE_OPTIONS: Array<{ id: MeetingType; label: string; icon: "team" | "sprint" | "brainstorm" }> = [
+  { id: "team", label: "Team vergadering", icon: "team" },
+  { id: "sprint_planning", label: "Sprint planning", icon: "sprint" },
+  { id: "brainstorm", label: "Brainstormsessie", icon: "brainstorm" },
+];
+const DEVELOPMENT_PROVIDER_IDS = ["openai", "google", "ollama"];
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -810,13 +841,33 @@ function isChairParticipant(id?: string, name = "", role = ""): boolean {
   return normalizedId === "de-voorzitter" || normalizedName.includes("voorzitter") || normalizedRole.includes("facilitator");
 }
 
+function formatMeetingType(type?: string): string {
+  return MEETING_TYPE_OPTIONS.find((option) => option.id === type)?.label || "Team vergadering";
+}
+
+function asMeetingType(value?: string): MeetingType {
+  return MEETING_TYPE_OPTIONS.some((option) => option.id === value) ? (value as MeetingType) : "team";
+}
+
 function formatMeetingPhase(phase: string): string {
   const labels: Record<string, string> = {
     opening: "opent",
     input: "brengt in",
     "chair-bridge": "vat samen",
+    intervention: "grijpt in",
     reply: "reageert",
     closing: "sluit af",
+    "plan-slice": "plant",
+    "plan-bridge": "ordent plan",
+    "plan-check": "checkt plan",
+    research: "onderzoekt",
+    "research-bridge": "clustert",
+    "research-layer": "verdiept",
+    "research-synthesis": "synthese",
+    intake: "start",
+    "implementation-route": "route",
+    "test-plan": "testplan",
+    "loop-guard": "bewaakt",
     brainstorm: "brengt in",
     discussion: "reageert",
     round: "spreekt",
@@ -1017,7 +1068,15 @@ function App() {
   const [thinkingPersonaId, setThinkingPersonaId] = useState<string | null>(null);
   const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
   const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
+  const [meetingType, setMeetingType] = useState<MeetingType>("team");
   const [savedMeetings, setSavedMeetings] = useState<SavedMeetingRecord[]>([]);
+  const [devPrompt, setDevPrompt] = useState("Maak een robuuste implementatie, overleg, test en stop bij herhaling.");
+  const [devProvider, setDevProvider] = useState("ollama");
+  const [devModel, setDevModel] = useState("devstral:latest");
+  const [devMaxIterations, setDevMaxIterations] = useState(3);
+  const [devRunning, setDevRunning] = useState(false);
+  const [devResult, setDevResult] = useState<DevelopmentTeamResult | null>(null);
+  const [devError, setDevError] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -1067,6 +1126,10 @@ function App() {
   const currentModelChoices = Array.from(new Set([...(currentProviderOption?.models || []), currentModel].filter(Boolean)));
   const draftProviderOption = modelOptions.find((option) => option.id === draftPersona.modelSettings.provider) || modelOptions[0];
   const draftModelChoices = Array.from(new Set([...(draftProviderOption?.models || []), draftPersona.modelSettings.name].filter(Boolean)));
+  const developmentProviderOptions = modelOptions.filter((option) => DEVELOPMENT_PROVIDER_IDS.includes(option.id));
+  const developmentProviders = developmentProviderOptions.length ? developmentProviderOptions : modelOptions;
+  const devProviderOption = developmentProviders.find((option) => option.id === devProvider) || developmentProviders[0];
+  const devModelChoices = Array.from(new Set([...(devProviderOption?.models || []), devModel].filter(Boolean)));
   const readyFilePaths = attachments
     .filter((attachment) => attachment.status === "ready" && attachment.path)
     .map((attachment) => String(attachment.path));
@@ -1194,7 +1257,7 @@ function App() {
       const previousSelected = new Map(previous.map((member) => [member.id, member.selected]));
       const personaMembers = personaRecords
         .filter((record) => !record.archived)
-        .map((record) => memberFromPersona(record, previousSelected.get(record.id) ?? record.id === selectedPersonaId));
+        .map((record) => memberFromPersona(record, previousSelected.get(record.id) ?? (record.id === selectedPersonaId || DEFAULT_PERSONA_ORDER.includes(record.id))));
       const agentMembers = INITIAL_MEMBERS.map((member) => ({
         ...member,
         selected: previousSelected.get(member.id) ?? member.selected,
@@ -1279,6 +1342,7 @@ function App() {
     const summary = meetingSummaryFromPayload(payload, events) || String(record.summary || "");
     const startedEvent = events.map((event) => asRecord(event)).find((event) => event?.type === "meeting_started");
     const topic = String(record.topic || startedEvent?.topic || "Saved meeting");
+    const savedType = asMeetingType(String(record.meeting_type || startedEvent?.meeting_type || "team"));
     const id = uid("meeting");
     setMeetingsById((prev) => ({
       ...prev,
@@ -1286,6 +1350,7 @@ function App() {
         id,
         backendMeetingId: meetingId,
         topic,
+        meetingType: savedType,
         participants: participantRecords,
         personaIds: participantRecords.map((item) => item.id),
         agentIds: Array.isArray(record.agent_ids) ? record.agent_ids.map(String) : [],
@@ -1299,6 +1364,7 @@ function App() {
     }));
     setActiveMeetingId(id);
     setMeetingTopic(topic);
+    setMeetingType(savedType);
     setViewMode("meeting");
   }
 
@@ -1813,6 +1879,7 @@ function App() {
         [newId]: {
           id: newId,
           topic: "Review this thread and propose next actions.",
+          meetingType,
           participants: [],
           personaIds: [],
           agentIds: [],
@@ -2049,7 +2116,7 @@ function App() {
     const personaNames = selectedPersonaMembers.map((member) => member.name).join(", ");
     const topic = activeMeeting?.topic || meetingTopic.trim() || "Review this thread and propose next actions.";
     const summary = activeMeeting?.summary || activeMeeting?.transcript || "Er is nog geen consensus-samenvatting.";
-    setPrompt(`/agents ${topic}\n\nPersona meeting: ${personaNames || "geen persona's geselecteerd"}.\nFollow-up agents: ${handles || "none"}.\n\nConsensus summary:\n${summary}`);
+    setPrompt(`/agents ${topic}\n\nPersona meeting: ${formatMeetingType(activeMeeting?.meetingType || meetingType)} met ${personaNames || "geen persona's geselecteerd"}.\nFollow-up agents: ${handles || "none"}.\n\nConsensus summary:\n${summary}`);
     setViewMode("chat");
     setSlashOpen(false);
     window.setTimeout(() => composerRef.current?.focus(), 0);
@@ -2081,6 +2148,7 @@ function App() {
       [meetingId as string]: {
         id: meetingId as string,
         topic,
+        meetingType,
         participants: selectedParticipantRecords,
         personaIds: participants,
         agentIds: selectedAgentMembers.map((m) => m.id),
@@ -2098,6 +2166,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           topic,
+          meeting_type: meetingType,
           participants,
           model: model || DEFAULT_MODEL,
           provider: DEFAULT_PROVIDER,
@@ -2118,6 +2187,7 @@ function App() {
         [meetingId as string]: {
           ...prev[meetingId as string],
           backendMeetingId: typeof result.meeting_id === "string" ? result.meeting_id : prev[meetingId as string]?.backendMeetingId,
+          meetingType: asMeetingType(String(result.meeting_type || meetingType)),
           status: "completed",
           rounds,
           summary,
@@ -2157,6 +2227,7 @@ function App() {
         body: JSON.stringify({
           frontend_id: meeting.id,
           topic: meeting.topic,
+          meeting_type: meeting.meetingType,
           participants: meeting.participants,
           participant_ids: meeting.personaIds,
           agent_ids: meeting.agentIds,
@@ -2205,9 +2276,77 @@ function App() {
     });
   }
 
+  function updateMeetingType(value: MeetingType) {
+    setMeetingType(value);
+    if (!activeMeetingId) return;
+    setMeetingsById((prev) => {
+      const meeting = prev[activeMeetingId];
+      if (!meeting || meeting.status !== "draft") return prev;
+      return {
+        ...prev,
+        [activeMeetingId]: {
+          ...meeting,
+          meetingType: value,
+          updatedAt: nowIso(),
+        },
+      };
+    });
+  }
+
+  function updateDevProvider(value: string) {
+    const option = developmentProviders.find((item) => item.id === value);
+    setDevProvider(value);
+    setDevModel(option?.default_model || option?.models[0] || devModel || DEFAULT_MODEL);
+  }
+
+  async function startDevelopmentTeam() {
+    const promptText = devPrompt.trim() || meetingTopic.trim() || "Maak een robuuste implementatie en draai tests.";
+    const selectedParticipants = selectedPersonaMembers.map((member) => member.id);
+    const personaIds =
+      personasById["de-voorzitter"] && !selectedParticipants.includes("de-voorzitter")
+        ? ["de-voorzitter", ...selectedParticipants]
+        : selectedParticipants;
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    setDevRunning(true);
+    setDevError("");
+    setViewMode("development_team");
+    try {
+      const payload = await fetchJson<DevelopmentTeamResult>("/api/ouroboros-chat/development-team", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptText,
+          persona_ids: personaIds,
+          agent_ids: agentIds,
+          provider: devProvider,
+          model: devModel,
+          max_iterations: devMaxIterations,
+        }),
+      });
+      setDevResult(payload);
+    } catch (error) {
+      setDevResult(null);
+      setDevError(error instanceof Error ? error.message : "Development team failed");
+    } finally {
+      setDevRunning(false);
+    }
+  }
+
+  function insertDevelopmentPrompt() {
+    if (!devResult?.slash_prompt) return;
+    setPrompt(devResult.slash_prompt);
+    setViewMode("chat");
+    setSlashOpen(false);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
   function activateRail(target: ViewMode) {
     if (target === "meeting") {
       openMeetingTable();
+      return;
+    }
+    if (target === "development_team") {
+      setViewMode("development_team");
       return;
     }
     if (target === "persona_builder" && builderMode === null) {
@@ -2246,6 +2385,7 @@ function App() {
           <div className="chat-title-group">
             <span className="eyebrow">Ouroboros Meeting</span>
             <h1>{meeting?.topic || meetingTopic || "Persona table"}</h1>
+            <small>{formatMeetingType(meeting?.meetingType || meetingType)}</small>
           </div>
           <div className={`meeting-status-pill ${meeting?.status || "draft"}`}>
             {meetingRunning ? <Loader2 size={15} /> : <Users size={15} />}
@@ -2264,6 +2404,22 @@ function App() {
                 rows={3}
               />
             </label>
+            <div className="meeting-type-segment" role="tablist" aria-label="Vergadertype">
+              {MEETING_TYPE_OPTIONS.map((option) => {
+                const Icon = option.icon === "sprint" ? Command : option.icon === "brainstorm" ? Sparkles : Users;
+                return (
+                  <button
+                    className={meetingType === option.id ? "active" : ""}
+                    type="button"
+                    key={option.id}
+                    onClick={() => updateMeetingType(option.id)}
+                  >
+                    <Icon size={15} />
+                    <span>{option.label}</span>
+                  </button>
+                );
+              })}
+            </div>
             <div className="meeting-command-row">
               <button
                 className="meeting-action"
@@ -2406,7 +2562,7 @@ function App() {
                 {savedMeetings.slice(0, 6).map((item) => (
                   <button type="button" key={item.meeting_id} onClick={() => void openSavedMeeting(item.meeting_id)}>
                     <strong>{item.topic || item.meeting_id}</strong>
-                    <small>{item.summary || item.status || item.updated_at || item.meeting_id}</small>
+                    <small>{formatMeetingType(item.meeting_type)} - {item.summary || item.status || item.updated_at || item.meeting_id}</small>
                   </button>
                 ))}
               </div>
@@ -2480,6 +2636,205 @@ function App() {
     );
   }
 
+  function DevelopmentTeamWorkspace() {
+    const personaCount = selectedPersonaMembers.length;
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers : agentMeetingMembers.filter((member) => member.id === "codex");
+    const rounds = devResult?.rounds || [];
+
+    return (
+      <section className="meeting-workspace development-workspace" aria-label="Development team workspace">
+        <header className="meeting-workspace-header">
+          <div className="chat-title-group">
+            <span className="eyebrow">Ouroboros Development Team</span>
+            <h1>{devPrompt || "Agentisch coderen"}</h1>
+            <small>{devProvider} / {devModel}</small>
+          </div>
+          <div className={`meeting-status-pill ${devRunning ? "running" : devResult ? "completed" : devError ? "error" : "draft"}`}>
+            {devRunning ? <Loader2 size={15} /> : <Code2 size={15} />}
+            <span>{devRunning ? "running" : devResult ? "planned" : devError ? "error" : "draft"}</span>
+          </div>
+        </header>
+
+        <div className="meeting-workspace-body">
+          <section className="meeting-setup-band development-setup-band">
+            <label className="field meeting-topic-field">
+              <span>Prompt</span>
+              <textarea
+                value={devPrompt}
+                onChange={(event) => setDevPrompt(event.target.value)}
+                rows={4}
+              />
+            </label>
+            <div className="development-model-grid">
+              <label className="compact-field">
+                <span>Provider</span>
+                <select value={devProvider} onChange={(event) => updateDevProvider(event.target.value)}>
+                  {developmentProviders.map((option) => (
+                    <option value={option.id} key={option.id}>
+                      {providerOptionLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="compact-field">
+                <span>Model</span>
+                <select value={devModel} onChange={(event) => setDevModel(event.target.value)}>
+                  {devModelChoices.map((item) => (
+                    <option value={item} key={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="compact-field">
+                <span>Iteraties</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={devMaxIterations}
+                  onChange={(event) => setDevMaxIterations(Number(event.target.value) || 3)}
+                />
+              </label>
+            </div>
+            <div className="meeting-command-row">
+              <button className="meeting-action" type="button" onClick={() => void startDevelopmentTeam()} disabled={devRunning}>
+                {devRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                <span>Start team</span>
+              </button>
+              <button className="meeting-action secondary" type="button" onClick={insertDevelopmentPrompt} disabled={!devResult?.slash_prompt}>
+                <Sparkles size={17} />
+                <span>Create agent task</span>
+              </button>
+            </div>
+          </section>
+
+          <section className="participant-bar" aria-label="Development team members">
+            {[...selectedPersonaMembers, ...agentIds].map((member) => (
+              <button
+                className={`participant-chip ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
+                type="button"
+                key={`${member.source}-${member.id}`}
+                onClick={() => toggleMeetingMember(member.id)}
+                title={member.name}
+              >
+                <span className={`speaker-lamp ${devRunning ? "live" : "resting"}`} aria-hidden="true" />
+                <span
+                  className={`member-avatar ${member.online ? "online" : ""}`}
+                  style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                >
+                  {member.avatar?.kind === "image" ? <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" /> : initials(member.name)}
+                </span>
+                <span>
+                  <strong>{member.name}</strong>
+                  <small>{member.source === "agent" ? member.handle : isChairParticipant(member.id, member.name) ? "voorzitter" : "persona"}</small>
+                </span>
+              </button>
+            ))}
+            {!personaCount ? <span className="empty-note">Selecteer persona's of gebruik de standaard voorzitter.</span> : null}
+          </section>
+
+          <section className="meeting-selector-grid" aria-label="Development team selection">
+            <div className="meeting-selector-column">
+              <div className="member-section-label">
+                <span>Persona's</span>
+                <small>{selectedPersonaMembers.length} selected</small>
+              </div>
+              <div className="meeting-selector-list">
+                {personaMeetingMembers.map((member) => (
+                  <button
+                    className={`member-row ${member.selected ? "selected" : ""}`}
+                    key={member.id}
+                    type="button"
+                    onClick={() => toggleMeetingMember(member.id)}
+                  >
+                    <span
+                      className={`member-avatar ${member.online ? "online" : ""}`}
+                      style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                    >
+                      {member.avatar?.kind === "image" ? <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" /> : initials(member.name)}
+                    </span>
+                    <span>
+                      <strong>{member.name}</strong>
+                      <small>persona</small>
+                    </span>
+                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="meeting-selector-column">
+              <div className="member-section-label secondary">
+                <span>CLI agents</span>
+                <small>{selectedAgentMembers.length || 1} selected</small>
+              </div>
+              <div className="meeting-selector-list">
+                {agentMeetingMembers.map((member) => (
+                  <button
+                    className={`member-row secondary ${member.selected ? "selected" : ""}`}
+                    key={member.id}
+                    type="button"
+                    onClick={() => toggleMeetingMember(member.id)}
+                  >
+                    <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
+                    <span>
+                      <strong>{member.name}</strong>
+                      <small>{member.handle}</small>
+                    </span>
+                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="meeting-transcript-flow" aria-label="Development team transcript">
+            {devRunning ? (
+              <article className="meeting-turn pending">
+                <div className="pending-line">
+                  <span className="speaker-lamp live" aria-hidden="true" />
+                  <Loader2 size={16} />
+                  <span>Ontwikkelteam maakt het traject klaar</span>
+                </div>
+              </article>
+            ) : null}
+            {rounds.map((round) => (
+              <article className={`meeting-turn ${isChairParticipant(round.participantId, round.participantName) ? "chair-turn" : ""}`} key={round.id}>
+                <header className="meeting-turn-header">
+                  <div className="meeting-speaker">
+                    <span className="speaker-lamp resting" aria-hidden="true" />
+                    <div className="message-meta">
+                      <span>{round.participantName}</span>
+                      <span>{formatMeetingPhase(round.phase)}</span>
+                    </div>
+                  </div>
+                </header>
+                <StructuredMeetingText text={round.content} />
+              </article>
+            ))}
+            {devResult?.slash_prompt ? (
+              <article className="meeting-summary development-command-card">
+                <div className="message-meta">
+                  <span>{devResult.agent_command || "/codex"}</span>
+                  <span>{devResult.execution || "approval-gated"}</span>
+                </div>
+                <pre>{devResult.slash_prompt}</pre>
+              </article>
+            ) : null}
+            {devError ? (
+              <article className="meeting-turn error">
+                <div className="message-meta">
+                  <span>Error</span>
+                </div>
+                <p>{devError}</p>
+              </article>
+            ) : null}
+          </section>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <div className={`app-shell ${viewMode !== "chat" ? "inspector-open" : ""}`}>
       <aside className="icon-rail" aria-label="Primary navigation">
@@ -2504,6 +2859,15 @@ function App() {
             onClick={() => activateRail("meeting")}
           >
             <Users size={22} />
+          </button>
+          <button
+            className={`rail-button ${viewMode === "development_team" ? "active" : ""}`}
+            type="button"
+            aria-label="Development team"
+            title="Development team"
+            onClick={() => activateRail("development_team")}
+          >
+            <Code2 size={22} />
           </button>
           <button
             className={`rail-button ${viewMode === "persona_builder" ? "active" : ""}`}
@@ -2620,9 +2984,11 @@ function App() {
         </div>
       </aside>
 
-      <main className={`chat-main ${viewMode === "meeting" ? "meeting-main" : ""}`}>
+      <main className={`chat-main ${viewMode === "meeting" || viewMode === "development_team" ? "meeting-main" : ""}`}>
         {viewMode === "meeting" ? (
           <MeetingWorkspace />
+        ) : viewMode === "development_team" ? (
+          <DevelopmentTeamWorkspace />
         ) : (
           <>
         <header className="chat-header">
