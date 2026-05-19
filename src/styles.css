@@ -162,8 +162,13 @@ button {
 }
 
 .new-chat-button:hover,
-.meeting-action:hover {
+.meeting-action:hover:not(:disabled) {
   background: #1d2b27;
+}
+
+.meeting-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .search-shell {
@@ -783,6 +788,59 @@ p {
   gap: 8px;
 }
 
+.saved-meeting-strip {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: #10151a;
+}
+
+.saved-meeting-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.saved-meeting-list button {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  min-height: 54px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  color: var(--text);
+  text-align: left;
+  background: #0d1115;
+  cursor: pointer;
+}
+
+.saved-meeting-list button:hover {
+  border-color: rgba(123, 220, 195, 0.36);
+  background: #17201e;
+}
+
+.saved-meeting-list strong,
+.saved-meeting-list small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-meeting-list strong {
+  font-size: 12px;
+}
+
+.saved-meeting-list small {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
 .meeting-transcript-flow {
   display: grid;
   gap: 12px;
@@ -1229,6 +1287,45 @@ p {
 .knowledge-list {
   display: grid;
   gap: 6px;
+}
+
+.knowledge-link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 6px;
+}
+
+.knowledge-link-row input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 9px;
+  color: var(--text);
+  background: #0f1318;
+  outline: 0;
+}
+
+.knowledge-link-row input:focus {
+  border-color: rgba(123, 220, 195, 0.5);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.knowledge-link-row button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 34px;
+  border-radius: 10px;
+  color: #07100d;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.knowledge-link-row button:disabled {
+  color: var(--muted-2);
+  background: #151b21;
+  cursor: not-allowed;
 }
 
 .knowledge-file {

@@ -9,6 +9,7 @@ import {
   Code2,
   Command,
   FileText,
+  Globe2,
   Image,
   Loader2,
   MessageSquare,
@@ -114,6 +115,7 @@ type Persona = {
     previewUrl?: string;
   };
   knowledgeFiles: PersonaKnowledgeFile[];
+  knowledgeSources: PersonaKnowledgeSource[];
 };
 
 type PersonaKnowledgeFile = {
@@ -122,6 +124,12 @@ type PersonaKnowledgeFile = {
   filename?: string;
   size?: number;
   kind?: string;
+};
+
+type PersonaKnowledgeSource = {
+  url: string;
+  label: string;
+  note?: string;
 };
 
 type StoredPersona = {
@@ -141,6 +149,7 @@ type StoredPersona = {
   model_settings?: Persona["modelSettings"];
   avatar?: Persona["avatar"];
   knowledge_files?: PersonaKnowledgeFile[];
+  knowledge_sources?: PersonaKnowledgeSource[];
   archived?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -199,6 +208,17 @@ type Meeting = {
   status: MeetingStatus;
   updatedAt: string;
   error?: string;
+  saved?: boolean;
+};
+
+type SavedMeetingRecord = {
+  meeting_id: string;
+  topic?: string;
+  status?: string;
+  summary?: string;
+  updated_at?: string;
+  participants?: Array<{ id?: string; name?: string; role?: string }>;
+  agent_ids?: string[];
 };
 
 type MeetingMember = {
@@ -229,6 +249,21 @@ type UploadResponse = {
     kind?: string;
     mime_type?: string;
   }>;
+};
+
+type ModelProviderOption = {
+  id: string;
+  label: string;
+  models: string[];
+  default_model?: string;
+  configured?: boolean;
+  local_only?: boolean;
+  key_source?: string;
+};
+
+type ModelOptionsResponse = {
+  providers?: ModelProviderOption[];
+  brave?: { configured?: boolean; key_source?: string };
 };
 
 const DEFAULT_TOOLS: Record<string, boolean> = {
@@ -298,6 +333,31 @@ const INITIAL_MEMBERS: MeetingMember[] = [
   { id: "roo", name: "Roo", handle: "/roo", selected: false, online: true, source: "agent" },
   { id: "atlas", name: "Atlas", handle: "/atlas", selected: false, online: true, source: "agent" },
   { id: "deepseek", name: "DeepSeek", handle: "/deepseek", selected: false, online: true, source: "agent" },
+];
+
+const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
+  {
+    id: "ollama",
+    label: "Ollama local",
+    models: [DEFAULT_MODEL, "llama3.2:latest", "mistral:latest", "qwen2.5:latest"],
+    default_model: DEFAULT_MODEL,
+    configured: true,
+    local_only: true,
+  },
+  {
+    id: "anthropic",
+    label: "Claude via Cockpit API key",
+    models: ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-latest"],
+    default_model: "claude-sonnet-4-6",
+    configured: false,
+  },
+  {
+    id: "openai",
+    label: "OpenAI via Cockpit API key",
+    models: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"],
+    default_model: "gpt-5.4-mini",
+    configured: false,
+  },
 ];
 
 function uid(prefix: string): string {
@@ -548,6 +608,7 @@ function defaultPersona(): Persona {
     tools: { ...DEFAULT_TOOLS },
     avatar: { kind: "initials", color: "#7bdcc3" },
     knowledgeFiles: [],
+    knowledgeSources: [],
   };
 }
 
@@ -594,6 +655,7 @@ function personaFromStored(record: StoredPersona): Persona {
       }
       : { kind: "initials", color: "#7bdcc3" },
     knowledgeFiles: Array.isArray(record.knowledge_files) ? record.knowledge_files : [],
+    knowledgeSources: Array.isArray(record.knowledge_sources) ? record.knowledge_sources : [],
   };
 }
 
@@ -619,6 +681,9 @@ function composeSystemPrompt(persona: Persona): string {
     persona.knowledgeFiles.length
       ? `Knowledge files available: ${persona.knowledgeFiles.map((file) => file.label || file.filename || file.path).join(", ")}.`
       : "",
+    persona.knowledgeSources.length
+      ? `Knowledge links available: ${persona.knowledgeSources.map((source) => `${source.label || source.url}: ${source.url}`).join(", ")}.`
+      : "",
     `Persona: ${persona.name}. Tone: ${persona.tone}. Language: ${persona.language}. Memory: ${persona.memoryEnabled ? persona.memoryMode : "off"}.`,
   ].filter(Boolean);
   return parts.join("\n");
@@ -632,22 +697,35 @@ function meetingRoundsFromEvents(events: unknown[], fallbackParticipants: Stored
   return events
     .map((event, index): MeetingRound | null => {
       const record = asRecord(event);
-      if (!record || record.type !== "participant_turn") {
+      if (!record) {
+        return null;
+      }
+      const looksLikeSavedRound =
+        typeof record.content === "string" &&
+        (typeof record.participantName === "string" ||
+          typeof record.participant_name === "string" ||
+          typeof record.participantId === "string" ||
+          typeof record.participant_id === "string");
+      if (record.type !== "participant_turn" && !looksLikeSavedRound) {
         return null;
       }
       const participant = meetingParticipantFromEvent(record);
-      const participantId = participant.id ? String(participant.id) : undefined;
+      const participantId = participant.id
+        ? String(participant.id)
+        : record.participantId || record.participant_id
+          ? String(record.participantId || record.participant_id)
+          : undefined;
       const fallback = fallbackParticipants.find((item) => item.id === participantId);
       return {
-        id: `${record.meeting_id || "meeting"}-${record.round || 0}-${participantId || index}-${index}`,
+        id: String(record.id || `${record.meeting_id || "meeting"}-${record.round || 0}-${participantId || index}-${index}`),
         round: typeof record.round === "number" ? record.round : Number(record.round || 0) || undefined,
         phase: String(record.phase || "round"),
         participantId,
-        participantName: String(participant.name || fallback?.name || participantId || "Persona"),
-        role: String(participant.role || fallback?.role || ""),
-        tone: String(participant.tone || fallback?.tone || ""),
+        participantName: String(record.participantName || record.participant_name || participant.name || fallback?.name || participantId || "Persona"),
+        role: String(record.role || participant.role || fallback?.role || ""),
+        tone: String(record.tone || participant.tone || fallback?.tone || ""),
         content: String(record.content || ""),
-        createdAt: String(record.timestamp || nowIso()),
+        createdAt: String(record.createdAt || record.created_at || record.timestamp || nowIso()),
       };
     })
     .filter((round): round is MeetingRound => Boolean(round));
@@ -683,6 +761,8 @@ function App() {
   const [slashOptions, setSlashOptions] = useState<SlashOption[]>(FALLBACK_SLASH_OPTIONS);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [modelOptions, setModelOptions] = useState<ModelProviderOption[]>(FALLBACK_MODEL_OPTIONS);
+  const [braveConfigured, setBraveConfigured] = useState(false);
   const [backendState, setBackendState] = useState<BackendState>({
     status: "checking",
     label: "checking",
@@ -717,12 +797,15 @@ function App() {
   const [personaNotice, setPersonaNotice] = useState("");
   const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
   const [memoryDraft, setMemoryDraft] = useState("");
+  const [knowledgeLinkDraft, setKnowledgeLinkDraft] = useState("");
 
   // Meeting specific workspace state
   const [meetingRunning, setMeetingRunning] = useState(false);
+  const [meetingSaving, setMeetingSaving] = useState(false);
   const [thinkingPersonaId, setThinkingPersonaId] = useState<string | null>(null);
   const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
   const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
+  const [savedMeetings, setSavedMeetings] = useState<SavedMeetingRecord[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -734,7 +817,7 @@ function App() {
   const meetingPanelRef = useRef<HTMLElement>(null);
   const meetingTopicRef = useRef<HTMLTextAreaElement>(null);
   const statusPanelRef = useRef<HTMLElement>(null);
-  const modelInputRef = useRef<HTMLInputElement>(null);
+  const modelInputRef = useRef<HTMLSelectElement>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
 
   const currentThread = threadsById[activeThreadId];
@@ -758,6 +841,10 @@ function App() {
   const currentChatPersona = personaForThread(currentThread);
   const currentProvider = currentThread?.provider || currentChatPersona.modelSettings.provider || provider || DEFAULT_PROVIDER;
   const currentModel = currentThread?.modelName || currentChatPersona.modelSettings.name || currentChatPersona.model || model || DEFAULT_MODEL;
+  const currentProviderOption = modelOptions.find((option) => option.id === currentProvider) || modelOptions[0];
+  const currentModelChoices = Array.from(new Set([...(currentProviderOption?.models || []), currentModel].filter(Boolean)));
+  const draftProviderOption = modelOptions.find((option) => option.id === draftPersona.modelSettings.provider) || modelOptions[0];
+  const draftModelChoices = Array.from(new Set([...(draftProviderOption?.models || []), draftPersona.modelSettings.name].filter(Boolean)));
   const readyFilePaths = attachments
     .filter((attachment) => attachment.status === "ready" && attachment.path)
     .map((attachment) => String(attachment.path));
@@ -819,6 +906,23 @@ function App() {
           setSlashOptions(FALLBACK_SLASH_OPTIONS);
         }
       });
+
+    fetchJson<ModelOptionsResponse>("/api/ouroboros-chat/model-options")
+      .then((payload) => {
+        if (!cancelled) {
+          const providers = Array.isArray(payload.providers) && payload.providers.length ? payload.providers : FALLBACK_MODEL_OPTIONS;
+          setModelOptions(providers);
+          setBraveConfigured(Boolean(payload.brave?.configured));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setModelOptions(FALLBACK_MODEL_OPTIONS);
+          setBraveConfigured(false);
+        }
+      });
+
+    loadSavedMeetings().catch(() => undefined);
 
     loadPersonas().catch(() => {
       if (!cancelled) {
@@ -900,6 +1004,61 @@ function App() {
   async function loadMemory(personaId: string) {
     const payload = await fetchJson<{ memory?: MemoryItem[] }>(`/api/ouroboros-chat/memory?persona_id=${encodeURIComponent(personaId)}`);
     setMemoryItems(payload.memory || []);
+  }
+
+  async function loadSavedMeetings() {
+    const payload = await fetchJson<{ meetings?: SavedMeetingRecord[] }>("/api/ouroboros-chat/meetings");
+    setSavedMeetings(payload.meetings || []);
+  }
+
+  async function openSavedMeeting(meetingId: string) {
+    const payload = await fetchJson<Record<string, unknown>>(`/api/ouroboros-chat/meetings/${encodeURIComponent(meetingId)}`);
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    const record = asRecord(payload.record) || {};
+    const rawParticipants = Array.isArray(payload.participants)
+      ? payload.participants
+      : Array.isArray(record.participants)
+        ? record.participants
+        : [];
+    const participantRecords = rawParticipants
+      .map((item) => asRecord(item))
+      .filter((item): item is Record<string, unknown> => Boolean(item))
+      .map((item): StoredPersona => ({
+        id: String(item.id || slugId(String(item.name || "persona"))),
+        name: String(item.name || item.id || "Persona"),
+        role: String(item.role || ""),
+        tone: String(item.tone || ""),
+        rules: Array.isArray(item.rules) ? item.rules.map(String) : [],
+        system_prompt: String(item.system_prompt || ""),
+      }));
+    const rounds = meetingRoundsFromEvents(events, participantRecords);
+    const fallbackRounds = Array.isArray(payload.rounds)
+      ? meetingRoundsFromEvents(payload.rounds, participantRecords)
+      : [];
+    const summary = meetingSummaryFromPayload(payload, events) || String(record.summary || "");
+    const startedEvent = events.map((event) => asRecord(event)).find((event) => event?.type === "meeting_started");
+    const topic = String(record.topic || startedEvent?.topic || "Saved meeting");
+    const id = uid("meeting");
+    setMeetingsById((prev) => ({
+      ...prev,
+      [id]: {
+        id,
+        backendMeetingId: meetingId,
+        topic,
+        participants: participantRecords,
+        personaIds: participantRecords.map((item) => item.id),
+        agentIds: Array.isArray(record.agent_ids) ? record.agent_ids.map(String) : [],
+        rounds: rounds.length ? rounds : fallbackRounds,
+        summary,
+        transcript: String(record.transcript || meetingTranscriptFromRounds(rounds.length ? rounds : fallbackRounds, summary)),
+        status: "completed",
+        updatedAt: String(record.updated_at || nowIso()),
+        saved: true,
+      },
+    }));
+    setActiveMeetingId(id);
+    setMeetingTopic(topic);
+    setViewMode("meeting");
   }
 
   function applyPersonaSelection(record: StoredPersona): Persona {
@@ -1260,6 +1419,31 @@ function App() {
     }));
   }
 
+  function addPersonaKnowledgeLink() {
+    const raw = knowledgeLinkDraft.trim();
+    if (!raw) return;
+    const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    let label = url;
+    try {
+      label = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      label = raw;
+    }
+    setDraftPersona((current) => ({
+      ...current,
+      knowledgeSources: [...current.knowledgeSources, { url, label }],
+    }));
+    setKnowledgeLinkDraft("");
+    setPersonaNotice("Kennislink toegevoegd.");
+  }
+
+  function removePersonaKnowledgeLink(url: string) {
+    setDraftPersona((current) => ({
+      ...current,
+      knowledgeSources: current.knowledgeSources.filter((source) => source.url !== url),
+    }));
+  }
+
   async function savePersona({ asNew = false }: { asNew?: boolean } = {}) {
     if (!draftPersona.name.trim() || personaSaving) return;
     setPersonaSaving(true);
@@ -1287,7 +1471,7 @@ function App() {
           model_settings: draftPersona.modelSettings,
           avatar: draftPersona.avatar,
           knowledge_files: draftPersona.knowledgeFiles,
-          knowledge_sources: draftPersona.knowledgeFiles,
+          knowledge_sources: draftPersona.knowledgeSources,
           capabilities: Object.entries(draftPersona.tools).filter(([, enabled]) => enabled).map(([key]) => key),
           tags: ["custom"],
         }),
@@ -1337,6 +1521,7 @@ function App() {
       tools: { ...DEFAULT_TOOLS },
       avatar: { kind: "initials", color: "#f2c97d" },
       knowledgeFiles: [],
+      knowledgeSources: [],
     });
     setBuilderMode("create");
     setPersonaNotice("");
@@ -1693,8 +1878,10 @@ function App() {
           summary,
           transcript: content,
           updatedAt: nowIso(),
+          saved: true,
         }
       }));
+      void loadSavedMeetings();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Meeting failed";
       setMeetingsById((prev) => ({
@@ -1710,6 +1897,43 @@ function App() {
     } finally {
       setMeetingRunning(false);
       setThinkingPersonaId(null);
+    }
+  }
+
+  async function saveActiveMeeting() {
+    const meeting = activeMeeting;
+    if (!meeting || meetingSaving) return;
+    const backendMeetingId = meeting.backendMeetingId || uid("manual-meeting");
+    setMeetingSaving(true);
+    try {
+      const payload = await fetchJson<Record<string, unknown>>(`/api/ouroboros-chat/meetings/${encodeURIComponent(backendMeetingId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          frontend_id: meeting.id,
+          topic: meeting.topic,
+          participants: meeting.participants,
+          participant_ids: meeting.personaIds,
+          agent_ids: meeting.agentIds,
+          rounds: meeting.rounds,
+          summary: meeting.summary,
+          transcript: meeting.transcript || meetingTranscriptFromRounds(meeting.rounds, meeting.summary),
+          status: meeting.status === "error" ? "error" : "saved",
+        }),
+      });
+      const savedId = typeof payload.meeting_id === "string" ? payload.meeting_id : backendMeetingId;
+      setMeetingsById((prev) => ({
+        ...prev,
+        [meeting.id]: {
+          ...meeting,
+          backendMeetingId: savedId,
+          saved: true,
+          updatedAt: nowIso(),
+        },
+      }));
+      await loadSavedMeetings();
+    } finally {
+      setMeetingSaving(false);
     }
   }
 
@@ -1813,6 +2037,15 @@ function App() {
                 <Sparkles size={17} />
                 <span>Create agent task</span>
               </button>
+              <button
+                className="meeting-action secondary"
+                type="button"
+                onClick={() => void saveActiveMeeting()}
+                disabled={!meeting || meetingSaving || (!rounds.length && !summary)}
+              >
+                {meetingSaving ? <Loader2 size={17} /> : <FileText size={17} />}
+                <span>Save meeting</span>
+              </button>
             </div>
           </section>
 
@@ -1909,6 +2142,23 @@ function App() {
               </div>
             </div>
           </section>
+
+          {savedMeetings.length ? (
+            <section className="saved-meeting-strip" aria-label="Saved meetings">
+              <div className="member-section-label">
+                <span>Opgeslagen vergaderingen</span>
+                <small>{savedMeetings.length}</small>
+              </div>
+              <div className="saved-meeting-list">
+                {savedMeetings.slice(0, 6).map((item) => (
+                  <button type="button" key={item.meeting_id} onClick={() => void openSavedMeeting(item.meeting_id)}>
+                    <strong>{item.topic || item.meeting_id}</strong>
+                    <small>{item.summary || item.status || item.updated_at || item.meeting_id}</small>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <section className="meeting-transcript-flow" aria-label="Meeting transcript">
             {meetingRunning && !rounds.length ? (
@@ -2123,28 +2373,34 @@ function App() {
               <select
                 value={currentProvider}
                 onChange={(event) => {
+                  const option = modelOptions.find((item) => item.id === event.target.value);
+                  const nextModel = option?.default_model || option?.models[0] || currentModel;
                   setProvider(event.target.value);
-                  updateCurrentThreadSettings({ provider: event.target.value });
+                  setModel(nextModel);
+                  updateCurrentThreadSettings({ provider: event.target.value, modelName: nextModel });
                 }}
               >
-                <option value="ollama">ollama</option>
-                <option value="ouroboros">ouroboros</option>
-                <option value="roo">roo</option>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-                <option value="google">google</option>
+                {modelOptions.map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {option.label || option.id}{option.configured === false && !option.local_only ? " (key missing)" : ""}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="compact-field model-field">
               <span>Model</span>
-              <input
+              <select
                 ref={modelInputRef}
                 value={currentModel}
                 onChange={(event) => {
                   setModel(event.target.value);
                   updateCurrentThreadSettings({ modelName: event.target.value });
                 }}
-              />
+              >
+                {currentModelChoices.map((item) => (
+                  <option value={item} key={item}>{item}</option>
+                ))}
+              </select>
             </label>
           </div>
         </header>
@@ -2362,7 +2618,7 @@ function App() {
           </label>
           <label className="field">
             <span>Model</span>
-            <input
+            <select
               value={draftPersona.modelSettings.name}
               onChange={(event) =>
                 setDraftPersona({
@@ -2371,20 +2627,32 @@ function App() {
                   modelSettings: { ...draftPersona.modelSettings, name: event.target.value },
                 })
               }
-            />
+            >
+              {draftModelChoices.map((item) => (
+                <option value={item} key={item}>{item}</option>
+              ))}
+            </select>
           </label>
           <div className="two-col-fields">
             <label className="field">
               <span>Provider</span>
               <select
                 value={draftPersona.modelSettings.provider}
-                onChange={(event) => setDraftPersona({ ...draftPersona, modelSettings: { ...draftPersona.modelSettings, provider: event.target.value } })}
+                onChange={(event) => {
+                  const option = modelOptions.find((item) => item.id === event.target.value);
+                  const nextModel = option?.default_model || option?.models[0] || draftPersona.modelSettings.name;
+                  setDraftPersona({
+                    ...draftPersona,
+                    model: nextModel,
+                    modelSettings: { ...draftPersona.modelSettings, provider: event.target.value, name: nextModel },
+                  });
+                }}
               >
-                <option value="ollama">ollama</option>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-                <option value="google">google</option>
-                <option value="local">local</option>
+                {modelOptions.map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {option.label || option.id}{option.configured === false && !option.local_only ? " (key missing)" : ""}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="field">
@@ -2488,6 +2756,16 @@ function App() {
                 onChange={(event) => void uploadPersonaKnowledge(event.target.files)}
               />
             </div>
+            <div className="knowledge-link-row">
+              <input
+                value={knowledgeLinkDraft}
+                onChange={(event) => setKnowledgeLinkDraft(event.target.value)}
+                placeholder="https://bron.example/artikel"
+              />
+              <button type="button" onClick={addPersonaKnowledgeLink} disabled={!knowledgeLinkDraft.trim()}>
+                <Plus size={14} />
+              </button>
+            </div>
             <div className="knowledge-list">
               {draftPersona.knowledgeFiles.length ? (
                 draftPersona.knowledgeFiles.map((file) => (
@@ -2502,7 +2780,19 @@ function App() {
               ) : (
                 <span className="empty-note">Geen kennisbestanden</span>
               )}
+              {draftPersona.knowledgeSources.map((source) => (
+                <div className="knowledge-file" key={source.url}>
+                  <Globe2 size={15} />
+                  <span>{source.label || source.url}</span>
+                  <button type="button" onClick={() => removePersonaKnowledgeLink(source.url)} aria-label={`Remove ${source.label || source.url}`}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
             </div>
+            <span className="empty-note">
+              Web search: {draftPersona.tools.web_search ? braveConfigured ? "Brave actief" : "Brave key ontbreekt in Cockpit" : "uit voor deze persona"}
+            </span>
           </div>
           <button className="meeting-action" type="button" onClick={() => void savePersona()} disabled={personaSaving}>
             {personaSaving ? <Loader2 size={17} /> : <Check size={17} />}
