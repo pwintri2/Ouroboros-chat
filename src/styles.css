@@ -632,6 +632,202 @@ p {
   background: #0f1318;
 }
 
+.chat-main.meeting-main {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.meeting-workspace {
+  display: grid;
+  grid-template-rows: 76px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.meeting-workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-width: 0;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.meeting-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  background: #11161c;
+}
+
+.meeting-status-pill.running,
+.meeting-status-pill.completed {
+  border-color: rgba(123, 220, 195, 0.36);
+  color: var(--accent);
+}
+
+.meeting-status-pill.error {
+  border-color: rgba(251, 113, 133, 0.45);
+  color: var(--danger);
+}
+
+.meeting-status-pill svg {
+  flex: 0 0 auto;
+}
+
+.meeting-status-pill.running svg {
+  animation: spin 1s linear infinite;
+}
+
+.meeting-workspace-body {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-height: 0;
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.meeting-setup-band {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.meeting-topic-field textarea {
+  min-height: 82px;
+}
+
+.meeting-command-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.participant-bar {
+  display: flex;
+  gap: 10px;
+  min-height: 64px;
+  padding: 2px 0;
+  overflow-x: auto;
+}
+
+.participant-chip {
+  display: grid;
+  grid-template-columns: 34px minmax(112px, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 182px;
+  max-width: 240px;
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  color: var(--text);
+  text-align: left;
+  background: #10151a;
+  cursor: pointer;
+}
+
+.participant-chip.thinking {
+  border-color: rgba(242, 201, 125, 0.78);
+  box-shadow: 0 0 0 4px rgba(242, 201, 125, 0.1);
+  animation: thinkingPulse 1.4s ease-in-out infinite;
+}
+
+.participant-chip strong,
+.participant-chip small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.participant-chip strong {
+  font-size: 13px;
+}
+
+.participant-chip small {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.meeting-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.meeting-selector-column {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.meeting-selector-list {
+  display: grid;
+  gap: 8px;
+}
+
+.meeting-transcript-flow {
+  display: grid;
+  gap: 12px;
+  max-width: 980px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.meeting-turn,
+.meeting-summary {
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.meeting-turn.pending {
+  border-color: rgba(242, 201, 125, 0.36);
+}
+
+.meeting-turn.error {
+  border-color: rgba(251, 113, 133, 0.45);
+}
+
+.meeting-turn.empty {
+  border-style: dashed;
+  color: var(--muted);
+}
+
+.meeting-summary {
+  border-color: rgba(123, 220, 195, 0.42);
+  background: #121b1b;
+}
+
+.meeting-turn p,
+.meeting-summary p {
+  color: #e7ecef;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .composer-zone {
   padding: 12px 24px 20px;
   border-top: 1px solid rgba(31, 40, 49, 0.72);
@@ -1295,6 +1491,17 @@ p {
   }
 }
 
+@keyframes thinkingPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(242, 201, 125, 0.08);
+  }
+
+  50% {
+    box-shadow: 0 0 0 7px rgba(242, 201, 125, 0.18);
+  }
+}
+
 @media (max-width: 1180px) {
   .app-shell {
     grid-template-columns: 64px 196px minmax(0, 1fr);
@@ -1331,6 +1538,21 @@ p {
     align-items: flex-start;
     flex-direction: column;
     min-height: 132px;
+  }
+
+  .meeting-workspace-header,
+  .meeting-setup-band {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .meeting-workspace-header {
+    flex-direction: column;
+    min-height: 132px;
+  }
+
+  .meeting-selector-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .chat-main {

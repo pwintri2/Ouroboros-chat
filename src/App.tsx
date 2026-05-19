@@ -174,14 +174,31 @@ type BuilderMode = "create" | "edit" | null;
 type ThreadType = "neutral" | "persona";
 type MeetingStatus = "draft" | "running" | "completed" | "error";
 
+type MeetingRound = {
+  id: string;
+  round?: number;
+  phase: string;
+  participantId?: string;
+  participantName: string;
+  role?: string;
+  tone?: string;
+  content: string;
+  createdAt: string;
+};
+
 type Meeting = {
   id: string;
+  backendMeetingId?: string;
   topic: string;
+  participants: StoredPersona[];
   personaIds: string[];
   agentIds: string[];
+  rounds: MeetingRound[];
+  summary: string;
   transcript?: string;
   status: MeetingStatus;
   updatedAt: string;
+  error?: string;
 };
 
 type MeetingMember = {
@@ -607,6 +624,55 @@ function composeSystemPrompt(persona: Persona): string {
   return parts.join("\n");
 }
 
+function meetingParticipantFromEvent(event: Record<string, unknown>): Record<string, unknown> {
+  return asRecord(event.participant) || {};
+}
+
+function meetingRoundsFromEvents(events: unknown[], fallbackParticipants: StoredPersona[]): MeetingRound[] {
+  return events
+    .map((event, index): MeetingRound | null => {
+      const record = asRecord(event);
+      if (!record || record.type !== "participant_turn") {
+        return null;
+      }
+      const participant = meetingParticipantFromEvent(record);
+      const participantId = participant.id ? String(participant.id) : undefined;
+      const fallback = fallbackParticipants.find((item) => item.id === participantId);
+      return {
+        id: `${record.meeting_id || "meeting"}-${record.round || 0}-${participantId || index}-${index}`,
+        round: typeof record.round === "number" ? record.round : Number(record.round || 0) || undefined,
+        phase: String(record.phase || "round"),
+        participantId,
+        participantName: String(participant.name || fallback?.name || participantId || "Persona"),
+        role: String(participant.role || fallback?.role || ""),
+        tone: String(participant.tone || fallback?.tone || ""),
+        content: String(record.content || ""),
+        createdAt: String(record.timestamp || nowIso()),
+      };
+    })
+    .filter((round): round is MeetingRound => Boolean(round));
+}
+
+function meetingSummaryFromPayload(payload: Record<string, unknown>, events: unknown[]): string {
+  if (typeof payload.summary === "string" && payload.summary.trim()) {
+    return payload.summary.trim();
+  }
+  const summaryEvent = events
+    .map((event) => asRecord(event))
+    .find((event) => event?.type === "meeting_summary");
+  return String(summaryEvent?.summary || summaryEvent?.content || "").trim();
+}
+
+function meetingTranscriptFromRounds(rounds: MeetingRound[], summary: string): string {
+  const body = rounds
+    .map((round) => {
+      const label = round.round ? `Ronde ${round.round} / ${round.phase}` : round.phase;
+      return `${round.participantName} (${label}):\n${round.content}`;
+    })
+    .join("\n\n");
+  return [body, summary ? `Consensus & Actiepunten:\n${summary}` : ""].filter(Boolean).join("\n\n---\n\n");
+}
+
 function App() {
   const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -654,6 +720,7 @@ function App() {
 
   // Meeting specific workspace state
   const [meetingRunning, setMeetingRunning] = useState(false);
+  const [thinkingPersonaId, setThinkingPersonaId] = useState<string | null>(null);
   const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
   const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
 
@@ -671,6 +738,7 @@ function App() {
   const threadEndRef = useRef<HTMLDivElement>(null);
 
   const currentThread = threadsById[activeThreadId];
+  const activeMeeting = activeMeetingId ? meetingsById[activeMeetingId] : undefined;
   const messages = currentThread?.messages || [];
   const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at)), [personasById]);
 
@@ -1319,8 +1387,11 @@ function App() {
         [newId]: {
           id: newId,
           topic: "Review this thread and propose next actions.",
+          participants: [],
           personaIds: [],
           agentIds: [],
+          rounds: [],
+          summary: "",
           status: "draft",
           updatedAt: nowIso(),
         }
@@ -1550,8 +1621,10 @@ function App() {
   function insertMeetingPrompt() {
     const handles = selectedAgentMembers.map((member) => member.handle).join(", ");
     const personaNames = selectedPersonaMembers.map((member) => member.name).join(", ");
-    const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
-    setPrompt(`/agents ${topic} Persona meeting: ${personaNames || "geen persona's geselecteerd"}. Follow-up agents: ${handles || "none"}.`);
+    const topic = activeMeeting?.topic || meetingTopic.trim() || "Review this thread and propose next actions.";
+    const summary = activeMeeting?.summary || activeMeeting?.transcript || "Er is nog geen consensus-samenvatting.";
+    setPrompt(`/agents ${topic}\n\nPersona meeting: ${personaNames || "geen persona's geselecteerd"}.\nFollow-up agents: ${handles || "none"}.\n\nConsensus summary:\n${summary}`);
+    setViewMode("chat");
     setSlashOpen(false);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
@@ -1560,7 +1633,11 @@ function App() {
     const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
     const participants = selectedPersonaMembers.map((member) => member.id);
     if (!participants.length || meetingRunning) return;
+    const selectedParticipantRecords = participants
+      .map((id) => personasById[id])
+      .filter((record): record is StoredPersona => Boolean(record));
     setMeetingRunning(true);
+    setThinkingPersonaId(participants[0] || null);
     setViewMode("meeting");
 
     let meetingId = activeMeetingId;
@@ -1574,8 +1651,11 @@ function App() {
       [meetingId as string]: {
         id: meetingId as string,
         topic,
+        participants: selectedParticipantRecords,
         personaIds: participants,
         agentIds: selectedAgentMembers.map((m) => m.id),
+        rounds: [],
+        summary: "",
         status: "running",
         updatedAt: nowIso(),
         transcript: "Meeting started... Waiting for responses...\n"
@@ -1596,26 +1676,21 @@ function App() {
         }),
       });
       const events = Array.isArray(result.events) ? result.events : [];
-      const notes = events
-        .map((event) => asRecord(event))
-        .filter(Boolean)
-        .map((event) => {
-          const participant = asRecord(event?.participant);
-          const who = participant?.name || event?.type || "meeting";
-          return `${who}: ${event?.content || event?.topic || ""}`.trim();
-        })
-        .filter(Boolean)
-        .join("\n\n");
+      const rounds = meetingRoundsFromEvents(events, selectedParticipantRecords);
+      const summary = meetingSummaryFromPayload(result, events);
       const agentFollowUp = selectedAgentMembers.length
         ? `\n\nFollow-up agents selected for tasks after the meeting: ${selectedAgentMembers.map((member) => member.handle).join(", ")}. Use the Agent task button to prepare an approval-gated task prompt.`
         : "";
-      const content = `${notes || extractResponseText(result)}${agentFollowUp}`;
+      const content = `${meetingTranscriptFromRounds(rounds, summary) || extractResponseText(result)}${agentFollowUp}`;
 
       setMeetingsById((prev) => ({
         ...prev,
         [meetingId as string]: {
           ...prev[meetingId as string],
+          backendMeetingId: typeof result.meeting_id === "string" ? result.meeting_id : prev[meetingId as string]?.backendMeetingId,
           status: "completed",
+          rounds,
+          summary,
           transcript: content,
           updatedAt: nowIso(),
         }
@@ -1627,12 +1702,14 @@ function App() {
         [meetingId as string]: {
           ...prev[meetingId as string],
           status: "error",
+          error: message,
           transcript: `Error: ${message}`,
           updatedAt: nowIso(),
         }
       }));
     } finally {
       setMeetingRunning(false);
+      setThinkingPersonaId(null);
     }
   }
 
@@ -1640,6 +1717,23 @@ function App() {
     setMeetingMembers((previous) =>
       previous.map((member) => (member.id === id ? { ...member, selected: !member.selected } : member)),
     );
+  }
+
+  function updateMeetingTopic(value: string) {
+    setMeetingTopic(value);
+    if (!activeMeetingId) return;
+    setMeetingsById((prev) => {
+      const meeting = prev[activeMeetingId];
+      if (!meeting || meeting.status !== "draft") return prev;
+      return {
+        ...prev,
+        [activeMeetingId]: {
+          ...meeting,
+          topic: value,
+          updatedAt: nowIso(),
+        },
+      };
+    });
   }
 
   function activateRail(target: ViewMode) {
@@ -1666,6 +1760,211 @@ function App() {
       statusPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       modelInputRef.current?.focus();
     }, 0);
+  }
+
+  function MeetingWorkspace() {
+    const meeting = activeMeeting;
+    const activeParticipantMembers = (meeting?.participants || []).map((record) => memberFromPersona(record, true));
+    const participantBarMembers = selectedPersonaMembers.length ? selectedPersonaMembers : activeParticipantMembers;
+    const rounds = meeting?.rounds || [];
+    const summary = meeting?.summary || "";
+    const canStart = selectedPersonaMembers.length > 0 && !meetingRunning;
+
+    return (
+      <section className="meeting-workspace" aria-label="Meeting workspace">
+        <header className="meeting-workspace-header">
+          <div className="chat-title-group">
+            <span className="eyebrow">Ouroboros Meeting</span>
+            <h1>{meeting?.topic || meetingTopic || "Persona table"}</h1>
+          </div>
+          <div className={`meeting-status-pill ${meeting?.status || "draft"}`}>
+            {meetingRunning ? <Loader2 size={15} /> : <Users size={15} />}
+            <span>{meeting?.status || "draft"}</span>
+          </div>
+        </header>
+
+        <div className="meeting-workspace-body">
+          <section className="meeting-setup-band">
+            <label className="field meeting-topic-field">
+              <span>Topic</span>
+              <textarea
+                ref={meetingTopicRef}
+                value={meetingTopic}
+                onChange={(event) => updateMeetingTopic(event.target.value)}
+                rows={3}
+              />
+            </label>
+            <div className="meeting-command-row">
+              <button
+                className="meeting-action"
+                type="button"
+                onClick={() => void startPersonaMeeting()}
+                disabled={!canStart}
+              >
+                {meetingRunning ? <Loader2 size={17} /> : <Users size={17} />}
+                <span>Start meeting</span>
+              </button>
+              <button
+                className="meeting-action secondary"
+                type="button"
+                onClick={insertMeetingPrompt}
+                disabled={!summary}
+              >
+                <Sparkles size={17} />
+                <span>Create agent task</span>
+              </button>
+            </div>
+          </section>
+
+          <section className="participant-bar" aria-label="Selected meeting personas">
+            {participantBarMembers.length ? (
+              participantBarMembers.map((member) => (
+                <button
+                  className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""}`}
+                  type="button"
+                  key={member.id}
+                  onClick={() => toggleMeetingMember(member.id)}
+                  title={member.name}
+                >
+                  <span
+                    className={`member-avatar ${member.online ? "online" : ""}`}
+                    style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                  >
+                    {member.avatar?.kind === "image" ? (
+                      <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                    ) : (
+                      initials(member.name)
+                    )}
+                  </span>
+                  <span>
+                    <strong>{member.name}</strong>
+                    <small>{thinkingPersonaId === member.id ? "thinking" : "persona"}</small>
+                  </span>
+                </button>
+              ))
+            ) : (
+              <span className="empty-note">Selecteer persona's voor de vergadering.</span>
+            )}
+          </section>
+
+          <section className="meeting-selector-grid" aria-label="Meeting selection">
+            <div className="meeting-selector-column">
+              <div className="member-section-label">
+                <span>Persona's</span>
+                <small>{selectedPersonaMembers.length} selected</small>
+              </div>
+              <div className="meeting-selector-list">
+                {personaMeetingMembers.length ? (
+                  personaMeetingMembers.map((member) => (
+                    <button
+                      className={`member-row ${member.selected ? "selected" : ""}`}
+                      key={member.id}
+                      type="button"
+                      onClick={() => toggleMeetingMember(member.id)}
+                    >
+                      <span
+                        className={`member-avatar ${member.online ? "online" : ""}`}
+                        style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                      >
+                        {member.avatar?.kind === "image" ? (
+                          <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                        ) : (
+                          initials(member.name)
+                        )}
+                      </span>
+                      <span>
+                        <strong>{member.name}</strong>
+                        <small>persona</small>
+                      </span>
+                      {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                    </button>
+                  ))
+                ) : (
+                  <span className="empty-note">Maak eerst een persona aan.</span>
+                )}
+              </div>
+            </div>
+
+            <div className="meeting-selector-column">
+              <div className="member-section-label secondary">
+                <span>Agents voor vervolgtaken</span>
+                <small>{selectedAgentMembers.length} selected</small>
+              </div>
+              <div className="meeting-selector-list">
+                {agentMeetingMembers.map((member) => (
+                  <button
+                    className={`member-row secondary ${member.selected ? "selected" : ""}`}
+                    key={member.id}
+                    type="button"
+                    onClick={() => toggleMeetingMember(member.id)}
+                  >
+                    <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
+                    <span>
+                      <strong>{member.name}</strong>
+                      <small>{member.handle}</small>
+                    </span>
+                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="meeting-transcript-flow" aria-label="Meeting transcript">
+            {meetingRunning && !rounds.length ? (
+              <article className="meeting-turn pending">
+                <div className="message-meta">
+                  <span>Meeting runner</span>
+                  <span>running</span>
+                </div>
+                <div className="pending-line">
+                  <Loader2 size={16} />
+                  <span>Persona's denken sequentieel</span>
+                </div>
+              </article>
+            ) : null}
+            {rounds.length ? (
+              rounds.map((round) => (
+                <article className="meeting-turn" key={round.id}>
+                  <div className="message-meta">
+                    <span>{round.participantName}</span>
+                    <span>{round.round ? `Ronde ${round.round}` : round.phase}</span>
+                    {round.role ? <span>{round.role}</span> : null}
+                    {round.tone ? <span>{round.tone}</span> : null}
+                  </div>
+                  <p>{round.content}</p>
+                </article>
+              ))
+            ) : !meetingRunning ? (
+              <article className="meeting-turn empty">
+                <div className="message-meta">
+                  <span>Transcript</span>
+                  <span>wacht op start</span>
+                </div>
+                <p>Selecteer persona's, kies een topic en start de vergadering.</p>
+              </article>
+            ) : null}
+            {summary ? (
+              <article className="meeting-summary">
+                <div className="message-meta">
+                  <span>Consensus & Actiepunten</span>
+                  {meeting?.backendMeetingId ? <span>{meeting.backendMeetingId}</span> : null}
+                </div>
+                <p>{summary}</p>
+              </article>
+            ) : null}
+            {meeting?.error ? (
+              <article className="meeting-turn error">
+                <div className="message-meta">
+                  <span>Error</span>
+                </div>
+                <p>{meeting.error}</p>
+              </article>
+            ) : null}
+          </section>
+        </div>
+      </section>
+    );
   }
 
   return (
@@ -1808,7 +2107,11 @@ function App() {
         </div>
       </aside>
 
-      <main className="chat-main">
+      <main className={`chat-main ${viewMode === "meeting" ? "meeting-main" : ""}`}>
+        {viewMode === "meeting" ? (
+          <MeetingWorkspace />
+        ) : (
+          <>
         <header className="chat-header">
           <div className="chat-title-group">
             <span className="eyebrow">Ouroboros Chat</span>
@@ -1992,6 +2295,8 @@ function App() {
             </div>
           </div>
         </section>
+          </>
+        )}
       </main>
 
       <aside className="inspector" aria-label="Persona and meeting panels">
@@ -2208,9 +2513,18 @@ function App() {
               Save as new
             </button>
             <button type="button" onClick={() => void useDraftInChat()} disabled={!draftPersona.id}>
-              Use in chat
+              Use in new chat
             </button>
-            <button type="button" onClick={() => { if (draftPersona.id) { seatPersonaAtMeeting(personasById[draftPersona.id] || draftPersona); } }} disabled={!draftPersona.id}>
+            <button
+              type="button"
+              onClick={() => {
+                const record = draftPersona.id ? personasById[draftPersona.id] : undefined;
+                if (record) {
+                  seatPersonaAtMeeting(record);
+                }
+              }}
+              disabled={!draftPersona.id || !personasById[draftPersona.id]}
+            >
               Add to meeting
             </button>
             <button type="button" onClick={() => void duplicatePersona()} disabled={!draftPersona.id}>
@@ -2263,7 +2577,7 @@ function App() {
           </div>
           <label className="field">
             <span>Topic</span>
-            <textarea ref={meetingTopicRef} value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} rows={3} />
+            <textarea ref={meetingTopicRef} value={meetingTopic} onChange={(event) => updateMeetingTopic(event.target.value)} rows={3} />
           </label>
           <div className="member-list">
             <div className="member-section-label">
