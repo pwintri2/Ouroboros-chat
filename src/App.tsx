@@ -150,6 +150,7 @@ type StoredPersona = {
   avatar?: Persona["avatar"];
   knowledge_files?: PersonaKnowledgeFile[];
   knowledge_sources?: PersonaKnowledgeSource[];
+  builtin?: boolean;
   archived?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -259,6 +260,9 @@ type ModelProviderOption = {
   configured?: boolean;
   local_only?: boolean;
   key_source?: string;
+  auth_mode?: string;
+  direct_chat?: boolean;
+  agent_runtime_only?: boolean;
 };
 
 type ModelOptionsResponse = {
@@ -339,7 +343,7 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
   {
     id: "ollama",
     label: "Ollama local",
-    models: [DEFAULT_MODEL, "llama3.2:latest", "mistral:latest", "qwen2.5:latest"],
+    models: [DEFAULT_MODEL, "gpt-oss:120b-cloud", "llama3.2:latest", "mistral:latest", "qwen2.5:latest", "deepseek-coder:latest", "devstral:latest"],
     default_model: DEFAULT_MODEL,
     configured: true,
     local_only: true,
@@ -358,7 +362,37 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
     default_model: "gpt-5.4-mini",
     configured: false,
   },
+  {
+    id: "deepseek",
+    label: "DeepSeek via Cockpit API key",
+    models: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+    default_model: "deepseek-chat",
+    configured: false,
+  },
+  {
+    id: "google",
+    label: "Gemini via Cockpit API key",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro"],
+    default_model: "gemini-2.5-flash",
+    configured: false,
+  },
+  {
+    id: "xai",
+    label: "Grok/xAI via Cockpit API key",
+    models: ["grok-3", "grok-3-mini", "grok-3-latest", "grok-2-latest"],
+    default_model: "grok-3",
+    configured: false,
+  },
+  {
+    id: "mistral",
+    label: "Mistral via Cockpit API key",
+    models: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
+    default_model: "mistral-large-latest",
+    configured: false,
+  },
 ];
+
+const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-ontwerper", "de-criticus"];
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -583,6 +617,17 @@ function timestampValue(value?: string): number {
   return Number.isFinite(time) ? time : 0;
 }
 
+function providerOptionLabel(option: ModelProviderOption): string {
+  const suffix = option.agent_runtime_only
+    ? " (OAuth agent)"
+    : option.configured === false && !option.local_only
+      ? " (key missing)"
+      : option.auth_mode && option.auth_mode !== "api_key_from_subscription" && option.direct_chat === false
+        ? ` (${option.auth_mode})`
+        : "";
+  return `${option.label || option.id}${suffix}`;
+}
+
 function defaultPersona(): Persona {
   return {
     id: undefined,
@@ -706,7 +751,7 @@ function meetingRoundsFromEvents(events: unknown[], fallbackParticipants: Stored
           typeof record.participant_name === "string" ||
           typeof record.participantId === "string" ||
           typeof record.participant_id === "string");
-      if (record.type !== "participant_turn" && !looksLikeSavedRound) {
+      if (record.type !== "participant_turn" && record.type !== "participant_note" && !looksLikeSavedRound) {
         return null;
       }
       const participant = meetingParticipantFromEvent(record);
@@ -823,7 +868,17 @@ function App() {
   const currentThread = threadsById[activeThreadId];
   const activeMeeting = activeMeetingId ? meetingsById[activeMeetingId] : undefined;
   const messages = currentThread?.messages || [];
-  const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at)), [personasById]);
+  const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => {
+    const leftDefault = DEFAULT_PERSONA_ORDER.indexOf(left.id);
+    const rightDefault = DEFAULT_PERSONA_ORDER.indexOf(right.id);
+    if (leftDefault >= 0 || rightDefault >= 0) {
+      return (leftDefault >= 0 ? leftDefault : 99) - (rightDefault >= 0 ? rightDefault : 99);
+    }
+    if (left.builtin !== right.builtin) {
+      return left.builtin ? -1 : 1;
+    }
+    return timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at);
+  }), [personasById]);
 
   function personaForId(personaId?: string, fallback = draftPersona): Persona {
     const record = personasById[personaId || ""];
@@ -1020,7 +1075,10 @@ function App() {
       : Array.isArray(record.participants)
         ? record.participants
         : [];
-    const participantRecords = rawParticipants
+    const eventParticipants = events
+      .map((event) => meetingParticipantFromEvent(asRecord(event) || {}))
+      .filter((item) => item.id || item.name);
+    const participantRecords = (rawParticipants.length ? rawParticipants : eventParticipants)
       .map((item) => asRecord(item))
       .filter((item): item is Record<string, unknown> => Boolean(item))
       .map((item): StoredPersona => ({
@@ -2382,7 +2440,7 @@ function App() {
               >
                 {modelOptions.map((option) => (
                   <option value={option.id} key={option.id}>
-                    {option.label || option.id}{option.configured === false && !option.local_only ? " (key missing)" : ""}
+                    {providerOptionLabel(option)}
                   </option>
                 ))}
               </select>
@@ -2650,7 +2708,7 @@ function App() {
               >
                 {modelOptions.map((option) => (
                   <option value={option.id} key={option.id}>
-                    {option.label || option.id}{option.configured === false && !option.local_only ? " (key missing)" : ""}
+                    {providerOptionLabel(option)}
                   </option>
                 ))}
               </select>
