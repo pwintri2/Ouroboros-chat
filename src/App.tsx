@@ -803,6 +803,28 @@ function meetingTranscriptFromRounds(rounds: MeetingRound[], summary: string): s
   return [body, summary ? `Consensus & Actiepunten:\n${summary}` : ""].filter(Boolean).join("\n\n---\n\n");
 }
 
+function isChairParticipant(id?: string, name = "", role = ""): boolean {
+  const normalizedId = String(id || "").toLowerCase();
+  const normalizedName = name.toLowerCase();
+  const normalizedRole = role.toLowerCase();
+  return normalizedId === "de-voorzitter" || normalizedName.includes("voorzitter") || normalizedRole.includes("facilitator");
+}
+
+function formatMeetingPhase(phase: string): string {
+  const labels: Record<string, string> = {
+    opening: "opent",
+    input: "brengt in",
+    "chair-bridge": "vat samen",
+    reply: "reageert",
+    closing: "sluit af",
+    brainstorm: "brengt in",
+    discussion: "reageert",
+    round: "spreekt",
+    saved: "notitie",
+  };
+  return labels[phase] || phase;
+}
+
 function cleanMeetingText(value: string): string {
   return value
     .replace(/^\s*[-*]\s*\*\*(.+?)\*\*:\s*/u, "$1: ")
@@ -2035,7 +2057,11 @@ function App() {
 
   async function startPersonaMeeting() {
     const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
-    const participants = selectedPersonaMembers.map((member) => member.id);
+    const selectedParticipants = selectedPersonaMembers.map((member) => member.id);
+    const participants =
+      personasById["de-voorzitter"] && !selectedParticipants.includes("de-voorzitter")
+        ? ["de-voorzitter", ...selectedParticipants]
+        : selectedParticipants;
     if (!participants.length || meetingRunning) return;
     const selectedParticipantRecords = participants
       .map((id) => personasById[id])
@@ -2273,7 +2299,7 @@ function App() {
             {participantBarMembers.length ? (
               participantBarMembers.map((member) => (
                 <button
-                  className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""}`}
+                  className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""} ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
                   type="button"
                   key={member.id}
                   onClick={() => toggleMeetingMember(member.id)}
@@ -2292,7 +2318,13 @@ function App() {
                   </span>
                   <span>
                     <strong>{member.name}</strong>
-                    <small>{thinkingPersonaId === member.id ? "aan het woord" : "persona"}</small>
+                    <small>
+                      {thinkingPersonaId === member.id
+                        ? "aan het woord"
+                        : isChairParticipant(member.id, member.name)
+                          ? "leidt gesprek"
+                          : "deelnemer"}
+                    </small>
                   </span>
                 </button>
               ))
@@ -2398,14 +2430,15 @@ function App() {
             {rounds.length ? (
               rounds.map((round) => {
                 const isActiveSpeaker = meetingRunning && thinkingPersonaId === round.participantId;
+                const isChairTurn = isChairParticipant(round.participantId, round.participantName, round.role);
                 return (
-                  <article className={`meeting-turn ${isActiveSpeaker ? "speaking" : ""}`} key={round.id}>
+                  <article className={`meeting-turn ${isActiveSpeaker ? "speaking" : ""} ${isChairTurn ? "chair-turn" : ""}`} key={round.id}>
                     <header className="meeting-turn-header">
                       <div className="meeting-speaker">
                         <span className={`speaker-lamp ${isActiveSpeaker ? "live" : "resting"}`} aria-hidden="true" />
                         <div className="message-meta">
                           <span>{round.participantName}</span>
-                          <span>{round.round ? `Ronde ${round.round}` : round.phase}</span>
+                          <span>{formatMeetingPhase(round.phase)}</span>
                           {round.role ? <span>{round.role}</span> : null}
                           {round.tone ? <span>{round.tone}</span> : null}
                         </div>

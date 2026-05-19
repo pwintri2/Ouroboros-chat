@@ -753,6 +753,11 @@ p {
   animation: thinkingPulse 1.4s ease-in-out infinite;
 }
 
+.participant-chip.chair-chip {
+  border-color: rgba(123, 220, 195, 0.28);
+  background: #111b1b;
+}
+
 .participant-chip strong,
 .participant-chip small {
   display: block;
@@ -843,8 +848,8 @@ p {
 
 .meeting-transcript-flow {
   display: grid;
-  gap: 12px;
-  max-width: 980px;
+  gap: 10px;
+  max-width: 900px;
   min-width: 0;
   padding-top: 4px;
 }
@@ -865,6 +870,15 @@ p {
 .meeting-turn.speaking {
   border-color: rgba(242, 201, 125, 0.7);
   background: #171b1c;
+}
+
+.meeting-turn.chair-turn {
+  border-color: rgba(123, 220, 195, 0.32);
+  background: #111819;
+}
+
+.meeting-turn.chair-turn.speaking {
+  border-color: rgba(242, 201, 125, 0.72);
 }
 
 .meeting-turn.error {
@@ -924,11 +938,11 @@ p {
 }
 
 .structured-meeting-text h3 {
-  margin: 7px 0 0;
-  color: #f2c97d;
-  font-size: 12px;
+  margin: 4px 0 0;
+  color: var(--accent);
+  font-size: 13px;
   line-height: 1.35;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 .structured-meeting-text p,
@@ -959,27 +973,28 @@ p {
 }
 
 .meeting-kv {
-  display: grid;
-  grid-template-columns: minmax(98px, 0.32fr) minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  padding: 8px 10px;
-  border: 1px solid rgba(123, 220, 195, 0.13);
-  border-radius: 8px;
-  background: rgba(11, 13, 16, 0.26);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
 .meeting-kv strong {
-  min-width: 0;
+  flex: 0 0 auto;
+  max-width: 140px;
+  padding: 2px 7px;
+  border: 1px solid rgba(123, 220, 195, 0.2);
+  border-radius: 999px;
   color: var(--accent);
-  font-size: 12px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .structured-meeting-text.summary-text .meeting-kv {
-  border-color: rgba(123, 220, 195, 0.22);
-  background: rgba(123, 220, 195, 0.05);
+  align-items: flex-start;
 }
 
 .meeting-turn p,
@@ -1774,7 +1789,8 @@ p {
   }
 
   .meeting-kv {
-    grid-template-columns: minmax(0, 1fr);
+    align-items: flex-start;
+    flex-direction: column;
     gap: 3px;
   }
 
