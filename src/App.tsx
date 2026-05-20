@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { Dispatch, KeyboardEvent, SetStateAction } from "react";
 import {
   AlertCircle,
   Bot,
@@ -195,6 +195,12 @@ type MeetingRound = {
   tone?: string;
   content: string;
   createdAt: string;
+  assignmentTrackKey?: string;
+  nextSpeakerId?: string;
+  previousSpeakerId?: string;
+  topicIntent?: string;
+  isFloorControl?: boolean;
+  isIntervention?: boolean;
 };
 
 type Meeting = {
@@ -818,16 +824,24 @@ function meetingRoundsFromEvents(events: unknown[], fallbackParticipants: Stored
           ? String(record.participantId || record.participant_id)
           : undefined;
       const fallback = fallbackParticipants.find((item) => item.id === participantId);
+      const promptContext = asRecord(record.prompt_context) || asRecord(record.promptContext) || {};
+      const phase = String(record.phase || "round");
       return {
         id: String(record.id || `${record.meeting_id || "meeting"}-${record.round || 0}-${participantId || index}-${index}`),
         round: typeof record.round === "number" ? record.round : Number(record.round || 0) || undefined,
-        phase: String(record.phase || "round"),
+        phase,
         participantId,
         participantName: String(record.participantName || record.participant_name || participant.name || fallback?.name || participantId || "Persona"),
         role: String(record.role || participant.role || fallback?.role || ""),
         tone: String(record.tone || participant.tone || fallback?.tone || ""),
         content: String(record.content || ""),
         createdAt: String(record.createdAt || record.created_at || record.timestamp || nowIso()),
+        assignmentTrackKey: promptContext.assignment_track_key ? String(promptContext.assignment_track_key) : undefined,
+        nextSpeakerId: promptContext.next_speaker ? String(promptContext.next_speaker) : undefined,
+        previousSpeakerId: promptContext.previous_speaker ? String(promptContext.previous_speaker) : undefined,
+        topicIntent: promptContext.topic_intent ? String(promptContext.topic_intent) : undefined,
+        isFloorControl: phase === "floor-control" || Boolean(promptContext.floor_control),
+        isIntervention: phase === "intervention" || promptContext.intervention_reason === "anti_parroting",
       };
     })
     .filter((round): round is MeetingRound => Boolean(round));
@@ -881,10 +895,10 @@ function formatMeetingPhase(phase: string): string {
     "plan-slice": "plant",
     "plan-bridge": "ordent plan",
     "plan-check": "checkt plan",
-    research: "onderzoekt",
+    research: "verkent",
     "research-bridge": "clustert",
-    "research-layer": "verdiept",
-    "solution-dive": "zoekt oplossing",
+    "research-layer": "verdiept aanname",
+    "solution-dive": "stelt voor",
     "research-synthesis": "synthese",
     intake: "start",
     "implementation-route": "route",
@@ -896,6 +910,52 @@ function formatMeetingPhase(phase: string): string {
     saved: "notitie",
   };
   return labels[phase] || phase;
+}
+
+const MEETING_PHASE_TIMELINE: Record<MeetingType, Array<{ phase: string; label: string; hint: string }>> = {
+  team: [
+    { phase: "opening", label: "Opening", hint: "doel en eerste spreker" },
+    { phase: "input", label: "Inbreng", hint: "standpunt per deelnemer" },
+    { phase: "chair-bridge", label: "Tussenstand", hint: "keuze en spanning" },
+    { phase: "reply", label: "Antwoord", hint: "accepteren, aanpassen, parkeren" },
+    { phase: "closing", label: "Besluit", hint: "eigenaar en volgende stap" },
+  ],
+  sprint_planning: [
+    { phase: "opening", label: "Opening", hint: "sprintdoel en timebox" },
+    { phase: "plan-slice", label: "Plan-slice", hint: "taak, acceptatie, test" },
+    { phase: "plan-bridge", label: "Concept-bord", hint: "volgorde en rollback" },
+    { phase: "plan-check", label: "Delivery-check", hint: "ontbrekende grens" },
+    { phase: "closing", label: "Sprintkaart", hint: "wanneer een agent mag bouwen" },
+  ],
+  brainstorm: [
+    { phase: "opening", label: "Opening", hint: "onderzoekscontract" },
+    { phase: "research", label: "Verkenning", hint: "bronlaag per persona" },
+    { phase: "research-bridge", label: "Clustering", hint: "lagen naast elkaar" },
+    { phase: "research-layer", label: "Verdieping", hint: "aanname en alternatief" },
+    { phase: "solution-dive", label: "Voorstel", hint: "kleine concrete patch" },
+    { phase: "research-synthesis", label: "Synthese", hint: "bouwvolgorde" },
+    { phase: "closing", label: "Afronding", hint: "wat na Akkoord pas mag" },
+  ],
+};
+
+const ASSIGNMENT_TRACK_LABELS: Record<string, string> = {
+  watchdog: "Monitoring-laag",
+  telemetry: "Telemetrie",
+  recovery: "Herstelroute",
+  "status-ui": "Statuspaneel",
+  rollback: "Rollback-register",
+  "circuit-breaker": "Modelpoort",
+  "vertical-slice": "Verticale slice",
+  "contract-first": "Contract-first",
+};
+
+function meetingPhaseTimeline(type: MeetingType): Array<{ phase: string; label: string; hint: string }> {
+  return MEETING_PHASE_TIMELINE[type] || MEETING_PHASE_TIMELINE.team;
+}
+
+function trackLabelFor(key?: string): string {
+  if (!key) return "";
+  return ASSIGNMENT_TRACK_LABELS[key] || key.replace(/[-_]/g, " ");
 }
 
 function cleanMeetingText(value: string): string {
@@ -1054,9 +1114,9 @@ function meetingThoughtFlow(member: MeetingMember | undefined, type: MeetingType
   }
   if (type === "brainstorm") {
     return [
-      { label: "Deep search", detail: "bronlaag, waarneming, onzekerheid" },
-      { label: "Deep think", detail: "aanname, alternatief, tegenvoorbeeld" },
-      { label: "Experiment", detail: "kritiek omzetten in oplossingstest" },
+      { label: "Verkent", detail: "bronlaag, waarneming, onzekerheid" },
+      { label: "Verdiept", detail: "aanname, alternatief, tegenvoorbeeld" },
+      { label: "Stelt voor", detail: "kritiek omzetten in oplossingstest" },
     ];
   }
   return [
@@ -1074,12 +1134,12 @@ function meetingThoughtNarrative(member: MeetingMember | undefined, type: Meetin
       return `${name} opent het sprintcontract, geeft elke beurt een delivery-opdracht en sluit af met taak, test en rollback.`;
     }
     if (type === "brainstorm") {
-      return `${name} opent de onderzoeksruimte, stuurt van deep search naar deep think en maakt kritiek productief.`;
+      return `${name} opent de onderzoeksruimte, stuurt van verkennen naar verdiepen en maakt kritiek productief.`;
     }
     return `${name} opent de teamvergadering, bewaakt de besliskeuze en geeft expliciet de volgende spreker het woord.`;
   }
   if (type === "brainstorm") {
-    return `${name} doet eerst deep search op bronlagen en daarna deep think op aannames, alternatieven en een oplossingsexperiment.`;
+    return `${name} verkent eerst de bronlaag en gaat daarna dieper in op aannames, alternatieven en een klein oplossingsexperiment.`;
   }
   if (type === "sprint_planning") {
     return `${name} maakt het voorstel bouwbaar: taak, acceptatiecriterium, testcommando, rollback en stopregel.`;
@@ -1207,6 +1267,8 @@ function App() {
   const statusPanelRef = useRef<HTMLElement>(null);
   const modelInputRef = useRef<HTMLSelectElement>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
+  const meetingTranscriptRef = useRef<HTMLElement>(null);
+  const meetingTranscriptEndRef = useRef<HTMLDivElement>(null);
 
   const currentThread = threadsById[activeThreadId];
   const activeMeeting = activeMeetingId ? meetingsById[activeMeetingId] : undefined;
@@ -1369,6 +1431,13 @@ function App() {
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length, activeThreadId, isSending]);
+
+  useEffect(() => {
+    if (viewMode !== "meeting") return;
+    const node = meetingTranscriptEndRef.current;
+    if (!node) return;
+    node.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [activeMeeting?.rounds.length, activeMeeting?.summary, viewMode]);
 
   useEffect(() => {
     setSlashIndex(0);
@@ -2290,20 +2359,7 @@ function App() {
       }
     }));
 
-    try {
-      const result = await fetchJson<Record<string, unknown>>("/api/ouroboros-chat/meetings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic,
-          meeting_type: meetingType,
-          participants,
-          model: model || DEFAULT_MODEL,
-          provider: DEFAULT_PROVIDER,
-          tools: [],
-          allow_tools: false,
-        }),
-      });
+    const finalizeFromResult = (result: Record<string, unknown>) => {
       const events = Array.isArray(result.events) ? result.events : [];
       const rounds = meetingRoundsFromEvents(events, selectedParticipantRecords);
       const summary = meetingSummaryFromPayload(result, events);
@@ -2311,7 +2367,6 @@ function App() {
         ? `\n\nFollow-up agents selected for tasks after the meeting: ${selectedAgentMembers.map((member) => member.handle).join(", ")}. Use the Agent task button to prepare an approval-gated task prompt.`
         : "";
       const content = `${meetingTranscriptFromRounds(rounds, summary) || extractResponseText(result)}${agentFollowUp}`;
-
       setMeetingsById((prev) => ({
         ...prev,
         [meetingId as string]: {
@@ -2326,9 +2381,9 @@ function App() {
           saved: true,
         }
       }));
-      void loadSavedMeetings();
-    } catch (error) {
-      const message = friendlyErrorMessage(error);
+    };
+
+    const recordError = (message: string) => {
       setMeetingsById((prev) => ({
         ...prev,
         [meetingId as string]: {
@@ -2339,10 +2394,172 @@ function App() {
           updatedAt: nowIso(),
         }
       }));
+    };
+
+    try {
+      const streamed = await streamPersonaMeeting({
+        topic,
+        participants,
+        meetingType,
+        participantRecords: selectedParticipantRecords,
+        meetingId: meetingId as string,
+        setThinkingPersonaId,
+        setMeetingsById,
+      });
+      if (streamed && streamed.finalResult) {
+        finalizeFromResult(streamed.finalResult);
+      } else if (!streamed) {
+        // Streaming not available — fall back to the legacy synchronous endpoint.
+        const result = await fetchJson<Record<string, unknown>>("/api/ouroboros-chat/meetings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic,
+            meeting_type: meetingType,
+            participants,
+            model: model || DEFAULT_MODEL,
+            provider: DEFAULT_PROVIDER,
+            tools: [],
+            allow_tools: false,
+          }),
+        });
+        finalizeFromResult(result);
+      } else {
+        // Stream ended without a `meeting_recorded` envelope — close out with what we have.
+        setMeetingsById((prev) => {
+          const existing = prev[meetingId as string];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [meetingId as string]: {
+              ...existing,
+              status: "completed",
+              updatedAt: nowIso(),
+            },
+          };
+        });
+      }
+      void loadSavedMeetings();
+    } catch (error) {
+      recordError(friendlyErrorMessage(error));
     } finally {
       setMeetingRunning(false);
       setThinkingPersonaId(null);
     }
+  }
+
+  async function streamPersonaMeeting(params: {
+    topic: string;
+    participants: string[];
+    meetingType: MeetingType;
+    participantRecords: StoredPersona[];
+    meetingId: string;
+    setThinkingPersonaId: (id: string | null) => void;
+    setMeetingsById: Dispatch<SetStateAction<Record<string, Meeting>>>;
+  }): Promise<{ finalResult: Record<string, unknown> | null } | null> {
+    const { topic, participants, meetingType: mt, participantRecords, meetingId, setThinkingPersonaId: setThinking, setMeetingsById: setMeetings } = params;
+    let response: Response;
+    try {
+      response = await fetch(apiUrl("/api/ouroboros-chat/meetings/stream"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({
+          topic,
+          meeting_type: mt,
+          participants,
+          model: model || DEFAULT_MODEL,
+          provider: DEFAULT_PROVIDER,
+          tools: [],
+          allow_tools: false,
+        }),
+      });
+    } catch {
+      return null;
+    }
+    if (!response.ok || !response.body) {
+      // Backend probably doesn't expose the streaming endpoint — caller should fall back.
+      return response.status === 404 ? null : (() => { throw new Error(`Streaming meeting failed: HTTP ${response.status}`); })();
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    const eventsSoFar: Record<string, unknown>[] = [];
+    let finalResult: Record<string, unknown> | null = null;
+
+    const handleEvent = (eventName: string, payload: Record<string, unknown>) => {
+      const type = String(payload.type || eventName || "");
+      if (type === "meeting_recorded") {
+        // The recorded envelope carries the full final result (events + summary + record path).
+        finalResult = payload;
+        setThinking(null);
+        return;
+      }
+      if (type === "meeting_error") {
+        throw new Error(String(payload.error || "Streaming meeting failed."));
+      }
+      eventsSoFar.push(payload);
+      const rounds = meetingRoundsFromEvents(eventsSoFar, participantRecords);
+      const summary = meetingSummaryFromPayload({}, eventsSoFar);
+      setMeetings((prev) => {
+        const existing = prev[meetingId];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [meetingId]: {
+            ...existing,
+            backendMeetingId:
+              typeof payload.meeting_id === "string" ? String(payload.meeting_id) : existing.backendMeetingId,
+            rounds,
+            summary,
+            updatedAt: nowIso(),
+          },
+        };
+      });
+
+      if (type === "participant_turn") {
+        const participantId =
+          (payload.participant && typeof (payload.participant as Record<string, unknown>).id === "string"
+            ? String((payload.participant as Record<string, unknown>).id)
+            : "") || "";
+        const phase = String(payload.phase || "");
+        const promptContext = (payload.prompt_context as Record<string, unknown>) || {};
+        if (phase === "floor-control" && typeof promptContext.next_speaker === "string") {
+          setThinking(String(promptContext.next_speaker));
+        } else if (participantId) {
+          setThinking(participantId);
+        }
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        let eventName = "";
+        let dataPayload = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataPayload += line.slice(5).trimStart();
+          }
+        }
+        if (!dataPayload) continue;
+        try {
+          const parsed = JSON.parse(dataPayload) as Record<string, unknown>;
+          handleEvent(eventName, parsed);
+        } catch (parseError) {
+          console.warn("Failed to parse SSE frame", parseError);
+        }
+      }
+    }
+
+    return { finalResult };
   }
 
   async function saveActiveMeeting() {
@@ -2560,6 +2777,24 @@ function App() {
     const rounds = meeting?.rounds || [];
     const summary = meeting?.summary || "";
     const canStart = selectedPersonaMembers.length > 0 && !meetingRunning;
+    const meetingTypeForView: MeetingType = meeting?.meetingType || meetingType;
+    const phaseTimeline = meetingPhaseTimeline(meetingTypeForView);
+    const seenPhases = new Set(rounds.map((round) => round.phase));
+    const tracksByPersonaId = new Map<string, string>();
+    rounds.forEach((round) => {
+      if (round.participantId && round.assignmentTrackKey && !tracksByPersonaId.has(round.participantId)) {
+        tracksByPersonaId.set(round.participantId, round.assignmentTrackKey);
+      }
+    });
+    const latestPhase = (() => {
+      for (let index = rounds.length - 1; index >= 0; index -= 1) {
+        const round = rounds[index];
+        if (round.phase && round.phase !== "floor-control" && round.phase !== "intervention") {
+          return round.phase;
+        }
+      }
+      return "";
+    })();
 
     return (
       <section className="meeting-workspace" aria-label="Meeting workspace">
@@ -2648,37 +2883,43 @@ function App() {
 
             <section className="participant-bar" aria-label="Selected meeting personas">
               {participantBarMembers.length ? (
-                participantBarMembers.map((member) => (
-                  <button
-                    className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""} ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
-                    type="button"
-                    key={member.id}
-                    onClick={() => toggleMeetingMember(member.id)}
-                    title={member.name}
-                  >
-                    <span className={`speaker-lamp ${thinkingPersonaId === member.id ? "live" : ""}`} aria-hidden="true" />
-                    <span
-                      className={`member-avatar ${member.online ? "online" : ""}`}
-                      style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                participantBarMembers.map((member) => {
+                  const isChair = isChairParticipant(member.id, member.name);
+                  const trackKey = !isChair ? tracksByPersonaId.get(member.id) || "" : "";
+                  const trackLabel = trackLabelFor(trackKey);
+                  return (
+                    <button
+                      className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""} ${isChair ? "chair-chip" : ""}`}
+                      type="button"
+                      key={member.id}
+                      onClick={() => toggleMeetingMember(member.id)}
+                      title={member.name + (trackLabel ? ` — werkt aan: ${trackLabel}` : "")}
                     >
-                      {member.avatar?.kind === "image" ? (
-                        <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
-                      ) : (
-                        initials(member.name)
-                      )}
-                    </span>
-                    <span>
-                      <strong>{member.name}</strong>
-                      <small className={thinkingPersonaId === member.id ? "chip-thought-loop" : ""}>
-                        {thinkingPersonaId === member.id
-                          ? meetingThoughtNarrative(member, meeting?.meetingType || meetingType)
-                          : isChairParticipant(member.id, member.name)
-                            ? "leidt gesprek"
-                            : "deelnemer"}
-                      </small>
-                    </span>
-                  </button>
-                ))
+                      <span className={`speaker-lamp ${thinkingPersonaId === member.id ? "live" : ""}`} aria-hidden="true" />
+                      <span
+                        className={`member-avatar ${member.online ? "online" : ""}`}
+                        style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                      >
+                        {member.avatar?.kind === "image" ? (
+                          <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                        ) : (
+                          initials(member.name)
+                        )}
+                      </span>
+                      <span className="participant-chip-body">
+                        <strong>{member.name}</strong>
+                        <small className={thinkingPersonaId === member.id ? "chip-thought-loop" : ""}>
+                          {thinkingPersonaId === member.id
+                            ? meetingThoughtNarrative(member, meetingTypeForView)
+                            : isChair
+                              ? "leidt gesprek"
+                              : "deelnemer"}
+                        </small>
+                        {trackLabel ? <span className="track-badge" aria-label={`Werkt aan ${trackLabel}`}>{trackLabel}</span> : null}
+                      </span>
+                    </button>
+                  );
+                })
               ) : (
                 <span className="empty-note">Selecteer persona's voor de vergadering.</span>
               )}
@@ -2765,7 +3006,28 @@ function App() {
             ) : null}
           </div>
 
-          <section className="meeting-transcript-flow" aria-label="Meeting transcript">
+          <section className="meeting-transcript-flow" aria-label="Meeting transcript" ref={meetingTranscriptRef}>
+            <nav className="meeting-phase-timeline" aria-label="Vergaderagenda">
+              {phaseTimeline.map((step, index) => {
+                const reached = seenPhases.has(step.phase);
+                const isCurrent = step.phase === latestPhase;
+                return (
+                  <div
+                    key={step.phase}
+                    className={`phase-step ${reached ? "reached" : ""} ${isCurrent ? "current" : ""}`}
+                    aria-current={isCurrent ? "step" : undefined}
+                  >
+                    <span className="phase-dot" aria-hidden="true">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
+                    <span className="phase-copy">
+                      <strong>{step.label}</strong>
+                      <small>{step.hint}</small>
+                    </span>
+                  </div>
+                );
+              })}
+            </nav>
             {meetingRunning && !rounds.length ? (
               <article className="meeting-turn pending">
                 <div className="message-meta">
@@ -2799,8 +3061,24 @@ function App() {
               rounds.map((round) => {
                 const isActiveSpeaker = meetingRunning && thinkingPersonaId === round.participantId;
                 const isChairTurn = isChairParticipant(round.participantId, round.participantName, round.role);
+                if (round.isFloorControl && !round.isIntervention) {
+                  const nextParticipant = participantBarMembers.find((member) => member.id === round.nextSpeakerId);
+                  const nextTrack = trackLabelFor(nextParticipant ? tracksByPersonaId.get(nextParticipant.id) : "");
+                  return (
+                    <div className="meeting-handoff" key={round.id} role="separator" aria-label="Voorzitter geeft het woord">
+                      <span className="handoff-from">{round.participantName}</span>
+                      <span className="handoff-arrow" aria-hidden="true">→</span>
+                      <span className="handoff-to">
+                        {nextParticipant?.name || "volgende spreker"}
+                        {nextTrack ? <em className="handoff-track">{nextTrack}</em> : null}
+                      </span>
+                      <span className="handoff-line">{round.content}</span>
+                    </div>
+                  );
+                }
+                const trackLabel = trackLabelFor(round.assignmentTrackKey);
                 return (
-                  <article className={`meeting-turn ${isActiveSpeaker ? "speaking" : ""} ${isChairTurn ? "chair-turn" : ""}`} key={round.id}>
+                  <article className={`meeting-turn ${isActiveSpeaker ? "speaking" : ""} ${isChairTurn ? "chair-turn" : ""} ${round.isIntervention ? "intervention-turn" : ""}`} key={round.id}>
                     <header className="meeting-turn-header">
                       <div className="meeting-speaker">
                         <span className={`speaker-lamp ${isActiveSpeaker ? "live" : "resting"}`} aria-hidden="true" />
@@ -2809,6 +3087,7 @@ function App() {
                           <span>{formatMeetingPhase(round.phase)}</span>
                         </div>
                       </div>
+                      {trackLabel ? <span className="turn-track-pill">{trackLabel}</span> : null}
                     </header>
                     <StructuredMeetingText text={round.content} />
                   </article>
@@ -2840,6 +3119,7 @@ function App() {
                 <p>{meeting.error}</p>
               </article>
             ) : null}
+            <div ref={meetingTranscriptEndRef} aria-hidden="true" />
           </section>
         </div>
       </section>
