@@ -388,6 +388,15 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
     configured: false,
   },
   {
+    id: "chatgpt_codex",
+    label: "ChatGPT-Codex abonnement",
+    models: ["gpt-5.2-codex", "gpt-5.1-codex", "gpt-5.0-codex", "o3", "o3-mini", "o4-mini"],
+    default_model: "gpt-5.2-codex",
+    configured: false,
+    auth_mode: "oauth_shared_file",
+    direct_chat: false,
+  },
+  {
     id: "openai",
     label: "OpenAI via Cockpit API key",
     models: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"],
@@ -425,12 +434,12 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
 ];
 
 const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-ontwerper", "de-criticus"];
-const MEETING_TYPE_OPTIONS: Array<{ id: MeetingType; label: string; icon: "team" | "sprint" | "brainstorm" }> = [
-  { id: "team", label: "Team vergadering", icon: "team" },
-  { id: "sprint_planning", label: "Sprint planning", icon: "sprint" },
-  { id: "brainstorm", label: "Brainstormsessie", icon: "brainstorm" },
+const MEETING_TYPE_OPTIONS: Array<{ id: MeetingType; label: string; hint: string; icon: "team" | "sprint" | "brainstorm" }> = [
+  { id: "team", label: "Team vergadering", hint: "keuze + eigenaar", icon: "team" },
+  { id: "sprint_planning", label: "Sprint planning", hint: "taak + test + rollback", icon: "sprint" },
+  { id: "brainstorm", label: "Brainstormsessie", hint: "deep search + deep think", icon: "brainstorm" },
 ];
-const DEVELOPMENT_PROVIDER_IDS = ["openai", "google", "ollama"];
+const DEVELOPMENT_PROVIDER_IDS = ["chatgpt_codex", "openai", "google", "ollama"];
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -479,6 +488,14 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return payload as T;
+}
+
+function friendlyErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || "Onbekende fout");
+  if (/load failed|failed to fetch|networkerror/i.test(message)) {
+    return "De backend reageerde niet op tijd of de verbinding met 127.0.0.1:8010 werd onderbroken. Probeer opnieuw; trage modelcalls vallen nu terug op transcript-fallbacks.";
+  }
+  return message;
 }
 
 function makeWelcomeMessage(personaName = "Ouroboros", introduction = ""): ChatMessage {
@@ -658,6 +675,8 @@ function timestampValue(value?: string): number {
 function providerOptionLabel(option: ModelProviderOption): string {
   const suffix = option.agent_runtime_only
     ? " (OAuth agent)"
+    : option.configured === false && option.auth_mode?.includes("oauth")
+      ? " (login missing)"
     : option.configured === false && !option.local_only
       ? " (key missing)"
       : option.auth_mode && option.auth_mode !== "api_key_from_subscription" && option.direct_chat === false
@@ -854,7 +873,9 @@ function formatMeetingPhase(phase: string): string {
     opening: "opent",
     input: "brengt in",
     "chair-bridge": "vat samen",
+    "floor-control": "geeft woord",
     intervention: "grijpt in",
+    "anti-parrot-redo": "herformuleert",
     reply: "reageert",
     closing: "sluit af",
     "plan-slice": "plant",
@@ -863,6 +884,7 @@ function formatMeetingPhase(phase: string): string {
     research: "onderzoekt",
     "research-bridge": "clustert",
     "research-layer": "verdiept",
+    "solution-dive": "zoekt oplossing",
     "research-synthesis": "synthese",
     intake: "start",
     "implementation-route": "route",
@@ -1014,6 +1036,96 @@ function StructuredMeetingText({ text, summary = false }: { text: string; summar
   );
 }
 
+function meetingThoughtFlow(member: MeetingMember | undefined, type: MeetingType): Array<{ label: string; detail: string }> {
+  const isChair = isChairParticipant(member?.id, member?.name);
+  if (isChair) {
+    return [
+      { label: "Opent", detail: "doel, contract en eerste spreker" },
+      { label: "Geeft woord", detail: "gerichte beurt met eigen opdracht" },
+      { label: "Sluit", detail: "besluit, plan of onderzoekstap" },
+    ];
+  }
+  if (type === "sprint_planning") {
+    return [
+      { label: "Taak", detail: "kleinste bouwstap met eigenaar" },
+      { label: "Test", detail: "acceptatiecriterium en smoke-run" },
+      { label: "Grens", detail: "rollback, afhankelijkheid, stopregel" },
+    ];
+  }
+  if (type === "brainstorm") {
+    return [
+      { label: "Deep search", detail: "bronlaag, waarneming, onzekerheid" },
+      { label: "Deep think", detail: "aanname, alternatief, tegenvoorbeeld" },
+      { label: "Experiment", detail: "kritiek omzetten in oplossingstest" },
+    ];
+  }
+  return [
+    { label: "Kiest", detail: "standpunt of beslisspanning" },
+    { label: "Weegt", detail: "bewijs, risico, open vraag" },
+    { label: "Besluit", detail: "eigenaar of vervolgstap" },
+  ];
+}
+
+function meetingThoughtNarrative(member: MeetingMember | undefined, type: MeetingType): string {
+  const name = member?.name || "De volgende spreker";
+  const isChair = isChairParticipant(member?.id, member?.name);
+  if (isChair) {
+    if (type === "sprint_planning") {
+      return `${name} opent het sprintcontract, geeft elke beurt een delivery-opdracht en sluit af met taak, test en rollback.`;
+    }
+    if (type === "brainstorm") {
+      return `${name} opent de onderzoeksruimte, stuurt van deep search naar deep think en maakt kritiek productief.`;
+    }
+    return `${name} opent de teamvergadering, bewaakt de besliskeuze en geeft expliciet de volgende spreker het woord.`;
+  }
+  if (type === "brainstorm") {
+    return `${name} doet eerst deep search op bronlagen en daarna deep think op aannames, alternatieven en een oplossingsexperiment.`;
+  }
+  if (type === "sprint_planning") {
+    return `${name} maakt het voorstel bouwbaar: taak, acceptatiecriterium, testcommando, rollback en stopregel.`;
+  }
+  return `${name} helpt de tafel kiezen met een standpunt, risico, eigenaar of besluitbare vervolgstap.`;
+}
+
+function chairLedSpeakerTimeline(members: MeetingMember[], type: MeetingType): string[] {
+  const ids = members.map((member) => member.id).filter(Boolean);
+  const chair = members.find((member) => isChairParticipant(member.id, member.name));
+  if (!chair) return ids;
+  const contributors = members.filter((member) => member.id !== chair.id);
+  if (!contributors.length) return [chair.id];
+  const timeline = [chair.id];
+  contributors.forEach((member) => {
+    timeline.push(member.id, chair.id);
+  });
+  if (type === "brainstorm") {
+    contributors.forEach((member) => {
+      timeline.push(member.id, chair.id);
+    });
+  }
+  return timeline;
+}
+
+function meetingDevelopmentPrompt(meeting: Meeting): string {
+  const transcript = meeting.rounds
+    .map((round) => `${round.participantName} (${formatMeetingPhase(round.phase)}): ${round.content}`)
+    .join("\n")
+    .slice(0, 5000);
+  const agentIds = meeting.agentIds.length ? meeting.agentIds.map((id) => `/${id}`).join(", ") : "/codex";
+  return [
+    `Ontwikkel/coderequest op basis van consensus: ${meeting.topic}`,
+    `Vergadertype: ${formatMeetingType(meeting.meetingType)}`,
+    `Voorkeursagents: ${agentIds}`,
+    "",
+    "Consensus:",
+    meeting.summary || "Geen consensus beschikbaar.",
+    "",
+    "Transcriptkern:",
+    transcript || "Geen transcript beschikbaar.",
+    "",
+    "Voer dit uit als Ouroboros development team: maak eerst een kort implementatieplan, wijzig klein, draai gerichte tests, laat de voorzitter stoppen bij herhaling of test-loops, en rapporteer bestanden plus verificatie.",
+  ].join("\n");
+}
+
 function App() {
   const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -1077,6 +1189,11 @@ function App() {
   const [devRunning, setDevRunning] = useState(false);
   const [devResult, setDevResult] = useState<DevelopmentTeamResult | null>(null);
   const [devError, setDevError] = useState("");
+  const [devApproval, setDevApproval] = useState("");
+  const [devLaunchRunning, setDevLaunchRunning] = useState(false);
+  const [devLaunchResult, setDevLaunchResult] = useState<Record<string, unknown> | null>(null);
+  const [devLaunchError, setDevLaunchError] = useState("");
+  const personasCountRef = useRef(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -1130,6 +1247,7 @@ function App() {
   const developmentProviders = developmentProviderOptions.length ? developmentProviderOptions : modelOptions;
   const devProviderOption = developmentProviders.find((option) => option.id === devProvider) || developmentProviders[0];
   const devModelChoices = Array.from(new Set([...(devProviderOption?.models || []), devModel].filter(Boolean)));
+  const chatgptCodexOption = modelOptions.find((option) => option.id === "chatgpt_codex");
   const readyFilePaths = attachments
     .filter((attachment) => attachment.status === "ready" && attachment.path)
     .map((attachment) => String(attachment.path));
@@ -1156,7 +1274,10 @@ function App() {
   const agentMeetingMembers = meetingMembers.filter((member) => member.source === "agent");
   const selectedPersonaMembers = personaMeetingMembers.filter((member) => member.selected);
   const selectedAgentMembers = agentMeetingMembers.filter((member) => member.selected);
-  const activeSpeakerIds = (activeMeeting?.personaIds.length ? activeMeeting.personaIds : selectedPersonaMembers.map((member) => member.id)).filter(Boolean);
+  const activeSpeakerMembers = activeMeeting?.participants.length
+    ? activeMeeting.participants.map((record) => memberFromPersona(record, true))
+    : selectedPersonaMembers;
+  const activeSpeakerIds = chairLedSpeakerTimeline(activeSpeakerMembers, activeMeeting?.meetingType || meetingType);
   const activeSpeakerKey = activeSpeakerIds.join("|");
   const draftPersonaAvatarSrc = draftPersona.avatar.previewUrl || uploadUrl(draftPersona.avatar.path, draftPersona.avatar.filename);
   const builderTitle =
@@ -1170,31 +1291,44 @@ function App() {
     if (!meetingRunning) return;
     const ids = activeSpeakerKey.split("|").filter(Boolean);
     if (!ids.length) return;
-    setThinkingPersonaId((current) => (current && ids.includes(current) ? current : ids[0]));
+    let position = 0;
+    setThinkingPersonaId(ids[position]);
     const timer = window.setInterval(() => {
-      setThinkingPersonaId((current) => {
-        const index = current ? ids.indexOf(current) : -1;
-        return ids[(index + 1) % ids.length] || ids[0];
-      });
+      position = (position + 1) % ids.length;
+      setThinkingPersonaId(ids[position] || ids[0]);
     }, 2600);
     return () => window.clearInterval(timer);
   }, [activeSpeakerKey, meetingRunning]);
 
   useEffect(() => {
+    personasCountRef.current = Object.keys(personasById).length;
+  }, [personasById]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    fetchJson<Record<string, unknown>>("/api/cockpit/config")
-      .then((payload) => {
+    async function refreshBackendStatus() {
+      try {
+        const payload = await fetchJson<Record<string, unknown>>("/api/cockpit/config");
         if (!cancelled) {
           const status = String(payload.status || "online");
           setBackendState({ status: "online", label: status });
+          if (personasCountRef.current === 0) {
+            void loadPersonas().catch(() => undefined);
+          }
         }
-      })
-      .catch((error: Error) => {
+      } catch (error) {
         if (!cancelled) {
-          setBackendState({ status: "offline", label: error.message || "offline" });
+          const message = error instanceof Error ? error.message : "offline";
+          setBackendState({ status: "offline", label: message || "offline" });
         }
-      });
+      }
+    }
+
+    void refreshBackendStatus();
+    const backendTimer = window.setInterval(() => {
+      void refreshBackendStatus();
+    }, 7000);
 
     fetchJson<unknown>("/api/ouroboros-chat/slash-menu")
       .then((payload) => {
@@ -1224,15 +1358,11 @@ function App() {
       });
 
     loadSavedMeetings().catch(() => undefined);
-
-    loadPersonas().catch(() => {
-      if (!cancelled) {
-        setPersonasById({});
-      }
-    });
+    loadPersonas().catch(() => undefined);
 
     return () => {
       cancelled = true;
+      window.clearInterval(backendTimer);
     };
   }, []);
 
@@ -2091,7 +2221,7 @@ function App() {
         };
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Chat request failed";
+      const message = friendlyErrorMessage(error);
       setThreadsById((prev) => {
         const thread = prev[threadId];
         if (!thread) return prev;
@@ -2198,7 +2328,7 @@ function App() {
       }));
       void loadSavedMeetings();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Meeting failed";
+      const message = friendlyErrorMessage(error);
       setMeetingsById((prev) => ({
         ...prev,
         [meetingId as string]: {
@@ -2299,16 +2429,18 @@ function App() {
     setDevModel(option?.default_model || option?.models[0] || devModel || DEFAULT_MODEL);
   }
 
-  async function startDevelopmentTeam() {
-    const promptText = devPrompt.trim() || meetingTopic.trim() || "Maak een robuuste implementatie en draai tests.";
-    const selectedParticipants = selectedPersonaMembers.map((member) => member.id);
+  async function startDevelopmentTeam(promptOverride?: string, personaOverride?: string[], agentOverride?: string[]) {
+    const promptText = promptOverride?.trim() || devPrompt.trim() || meetingTopic.trim() || "Maak een robuuste implementatie en draai tests.";
+    const selectedParticipants = personaOverride?.length ? personaOverride : selectedPersonaMembers.map((member) => member.id);
     const personaIds =
       personasById["de-voorzitter"] && !selectedParticipants.includes("de-voorzitter")
         ? ["de-voorzitter", ...selectedParticipants]
         : selectedParticipants;
-    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    const agentIds = agentOverride?.length ? agentOverride : selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
     setDevRunning(true);
     setDevError("");
+    setDevLaunchError("");
+    setDevLaunchResult(null);
     setViewMode("development_team");
     try {
       const payload = await fetchJson<DevelopmentTeamResult>("/api/ouroboros-chat/development-team", {
@@ -2326,9 +2458,35 @@ function App() {
       setDevResult(payload);
     } catch (error) {
       setDevResult(null);
-      setDevError(error instanceof Error ? error.message : "Development team failed");
+      setDevError(friendlyErrorMessage(error));
     } finally {
       setDevRunning(false);
+    }
+  }
+
+  function continueMeetingInDevelopmentTeam(autoPlan = false) {
+    const meeting = activeMeeting;
+    if (!meeting?.summary) return;
+    const promptText = meetingDevelopmentPrompt(meeting);
+    const personaIds = meeting.personaIds.length ? meeting.personaIds : selectedPersonaMembers.map((member) => member.id);
+    const agentIds = meeting.agentIds.length ? meeting.agentIds : selectedAgentMembers.map((member) => member.id);
+    const safeAgentIds = agentIds.length ? agentIds : ["codex"];
+    setDevPrompt(promptText);
+    setDevResult(null);
+    setDevError("");
+    setDevApproval("");
+    setDevLaunchError("");
+    setDevLaunchResult(null);
+    setMeetingMembers((previous) =>
+      previous.map((member) =>
+        member.source === "agent" && safeAgentIds.includes(member.id)
+          ? { ...member, selected: true }
+          : member
+      )
+    );
+    setViewMode("development_team");
+    if (autoPlan) {
+      void startDevelopmentTeam(promptText, personaIds, safeAgentIds);
     }
   }
 
@@ -2338,6 +2496,30 @@ function App() {
     setViewMode("chat");
     setSlashOpen(false);
     window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  async function approveAndStartDevelopmentBuild() {
+    if (!devResult?.slash_prompt || devApproval.trim() !== "Akkoord" || devLaunchRunning) return;
+    setDevLaunchRunning(true);
+    setDevLaunchError("");
+    setDevLaunchResult(null);
+    try {
+      const payload = await fetchJson<Record<string, unknown>>("/api/cockpit/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: devResult.slash_prompt,
+          approval: "Akkoord",
+          provider: devProvider,
+          model: devModel,
+        }),
+      });
+      setDevLaunchResult(payload);
+    } catch (error) {
+      setDevLaunchError(friendlyErrorMessage(error));
+    } finally {
+      setDevLaunchRunning(false);
+    }
   }
 
   function activateRail(target: ViewMode) {
@@ -2370,10 +2552,10 @@ function App() {
     }, 0);
   }
 
-  function MeetingWorkspace() {
+  function renderMeetingWorkspace() {
     const meeting = activeMeeting;
     const activeParticipantMembers = (meeting?.participants || []).map((record) => memberFromPersona(record, true));
-    const participantBarMembers = selectedPersonaMembers.length ? selectedPersonaMembers : activeParticipantMembers;
+    const participantBarMembers = activeParticipantMembers.length ? activeParticipantMembers : selectedPersonaMembers;
     const activeSpeaker = participantBarMembers.find((member) => member.id === thinkingPersonaId);
     const rounds = meeting?.rounds || [];
     const summary = meeting?.summary || "";
@@ -2394,180 +2576,194 @@ function App() {
         </header>
 
         <div className="meeting-workspace-body">
-          <section className="meeting-setup-band">
-            <label className="field meeting-topic-field">
-              <span>Topic</span>
-              <textarea
-                ref={meetingTopicRef}
-                value={meetingTopic}
-                onChange={(event) => updateMeetingTopic(event.target.value)}
-                rows={3}
-              />
-            </label>
-            <div className="meeting-type-segment" role="tablist" aria-label="Vergadertype">
-              {MEETING_TYPE_OPTIONS.map((option) => {
-                const Icon = option.icon === "sprint" ? Command : option.icon === "brainstorm" ? Sparkles : Users;
-                return (
-                  <button
-                    className={meetingType === option.id ? "active" : ""}
-                    type="button"
-                    key={option.id}
-                    onClick={() => updateMeetingType(option.id)}
-                  >
-                    <Icon size={15} />
-                    <span>{option.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="meeting-command-row">
-              <button
-                className="meeting-action"
-                type="button"
-                onClick={() => void startPersonaMeeting()}
-                disabled={!canStart}
-              >
-                {meetingRunning ? <Loader2 size={17} /> : <Users size={17} />}
-                <span>Start meeting</span>
-              </button>
-              <button
-                className="meeting-action secondary"
-                type="button"
-                onClick={insertMeetingPrompt}
-                disabled={!summary}
-              >
-                <Sparkles size={17} />
-                <span>Create agent task</span>
-              </button>
-              <button
-                className="meeting-action secondary"
-                type="button"
-                onClick={() => void saveActiveMeeting()}
-                disabled={!meeting || meetingSaving || (!rounds.length && !summary)}
-              >
-                {meetingSaving ? <Loader2 size={17} /> : <FileText size={17} />}
-                <span>Save meeting</span>
-              </button>
-            </div>
-          </section>
-
-          <section className="participant-bar" aria-label="Selected meeting personas">
-            {participantBarMembers.length ? (
-              participantBarMembers.map((member) => (
-                <button
-                  className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""} ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
-                  type="button"
-                  key={member.id}
-                  onClick={() => toggleMeetingMember(member.id)}
-                  title={member.name}
-                >
-                  <span className={`speaker-lamp ${thinkingPersonaId === member.id ? "live" : ""}`} aria-hidden="true" />
-                  <span
-                    className={`member-avatar ${member.online ? "online" : ""}`}
-                    style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
-                  >
-                    {member.avatar?.kind === "image" ? (
-                      <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
-                    ) : (
-                      initials(member.name)
-                    )}
-                  </span>
-                  <span>
-                    <strong>{member.name}</strong>
-                    <small>
-                      {thinkingPersonaId === member.id
-                        ? "aan het woord"
-                        : isChairParticipant(member.id, member.name)
-                          ? "leidt gesprek"
-                          : "deelnemer"}
-                    </small>
-                  </span>
-                </button>
-              ))
-            ) : (
-              <span className="empty-note">Selecteer persona's voor de vergadering.</span>
-            )}
-          </section>
-
-          <section className="meeting-selector-grid" aria-label="Meeting selection">
-            <div className="meeting-selector-column">
-              <div className="member-section-label">
-                <span>Persona's</span>
-                <small>{selectedPersonaMembers.length} selected</small>
-              </div>
-              <div className="meeting-selector-list">
-                {personaMeetingMembers.length ? (
-                  personaMeetingMembers.map((member) => (
+          <div className="meeting-config-stack">
+            <section className="meeting-setup-band">
+              <label className="field meeting-topic-field">
+                <span>Topic</span>
+                <textarea
+                  ref={meetingTopicRef}
+                  value={meetingTopic}
+                  onChange={(event) => updateMeetingTopic(event.target.value)}
+                  rows={3}
+                />
+              </label>
+              <div className="meeting-type-segment" role="tablist" aria-label="Vergadertype">
+                {MEETING_TYPE_OPTIONS.map((option) => {
+                  const Icon = option.icon === "sprint" ? Command : option.icon === "brainstorm" ? Sparkles : Users;
+                  return (
                     <button
-                      className={`member-row ${member.selected ? "selected" : ""}`}
+                      className={meetingType === option.id ? "active" : ""}
+                      type="button"
+                      key={option.id}
+                      onClick={() => updateMeetingType(option.id)}
+                    >
+                      <Icon size={15} />
+                      <span className="meeting-type-copy">
+                        <span>{option.label}</span>
+                        <small>{option.hint}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="meeting-command-row">
+                <button
+                  className="meeting-action"
+                  type="button"
+                  onClick={() => void startPersonaMeeting()}
+                  disabled={!canStart}
+                >
+                  {meetingRunning ? <Loader2 size={17} /> : <Users size={17} />}
+                  <span>Start meeting</span>
+                </button>
+                <button
+                  className="meeting-action secondary"
+                  type="button"
+                  onClick={insertMeetingPrompt}
+                  disabled={!summary}
+                >
+                  <Sparkles size={17} />
+                  <span>Create agent task</span>
+                </button>
+                <button
+                  className="meeting-action secondary"
+                  type="button"
+                  onClick={() => continueMeetingInDevelopmentTeam(true)}
+                  disabled={!summary || devRunning}
+                >
+                  {devRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                  <span>Dev workflow</span>
+                </button>
+                <button
+                  className="meeting-action secondary"
+                  type="button"
+                  onClick={() => void saveActiveMeeting()}
+                  disabled={!meeting || meetingSaving || (!rounds.length && !summary)}
+                >
+                  {meetingSaving ? <Loader2 size={17} /> : <FileText size={17} />}
+                  <span>Save meeting</span>
+                </button>
+              </div>
+            </section>
+
+            <section className="participant-bar" aria-label="Selected meeting personas">
+              {participantBarMembers.length ? (
+                participantBarMembers.map((member) => (
+                  <button
+                    className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""} ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
+                    type="button"
+                    key={member.id}
+                    onClick={() => toggleMeetingMember(member.id)}
+                    title={member.name}
+                  >
+                    <span className={`speaker-lamp ${thinkingPersonaId === member.id ? "live" : ""}`} aria-hidden="true" />
+                    <span
+                      className={`member-avatar ${member.online ? "online" : ""}`}
+                      style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                    >
+                      {member.avatar?.kind === "image" ? (
+                        <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                      ) : (
+                        initials(member.name)
+                      )}
+                    </span>
+                    <span>
+                      <strong>{member.name}</strong>
+                      <small className={thinkingPersonaId === member.id ? "chip-thought-loop" : ""}>
+                        {thinkingPersonaId === member.id
+                          ? meetingThoughtNarrative(member, meeting?.meetingType || meetingType)
+                          : isChairParticipant(member.id, member.name)
+                            ? "leidt gesprek"
+                            : "deelnemer"}
+                      </small>
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <span className="empty-note">Selecteer persona's voor de vergadering.</span>
+              )}
+            </section>
+
+            <section className="meeting-selector-grid" aria-label="Meeting selection">
+              <div className="meeting-selector-column">
+                <div className="member-section-label">
+                  <span>Persona's</span>
+                  <small>{selectedPersonaMembers.length} selected</small>
+                </div>
+                <div className="meeting-selector-list">
+                  {personaMeetingMembers.length ? (
+                    personaMeetingMembers.map((member) => (
+                      <button
+                        className={`member-row ${member.selected ? "selected" : ""}`}
+                        key={member.id}
+                        type="button"
+                        onClick={() => toggleMeetingMember(member.id)}
+                      >
+                        <span
+                          className={`member-avatar ${member.online ? "online" : ""}`}
+                          style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                        >
+                          {member.avatar?.kind === "image" ? (
+                            <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                          ) : (
+                            initials(member.name)
+                          )}
+                        </span>
+                        <span>
+                          <strong>{member.name}</strong>
+                          <small>persona</small>
+                        </span>
+                        {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                      </button>
+                    ))
+                  ) : (
+                    <span className="empty-note">Maak eerst een persona aan.</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="meeting-selector-column">
+                <div className="member-section-label secondary">
+                  <span>Agents voor vervolgtaken</span>
+                  <small>{selectedAgentMembers.length} selected</small>
+                </div>
+                <div className="meeting-selector-list">
+                  {agentMeetingMembers.map((member) => (
+                    <button
+                      className={`member-row secondary ${member.selected ? "selected" : ""}`}
                       key={member.id}
                       type="button"
                       onClick={() => toggleMeetingMember(member.id)}
                     >
-                      <span
-                        className={`member-avatar ${member.online ? "online" : ""}`}
-                        style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
-                      >
-                        {member.avatar?.kind === "image" ? (
-                          <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
-                        ) : (
-                          initials(member.name)
-                        )}
-                      </span>
+                      <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
                       <span>
                         <strong>{member.name}</strong>
-                        <small>persona</small>
+                        <small>{member.handle}</small>
                       </span>
                       {member.selected ? <Check size={16} /> : <Plus size={16} />}
                     </button>
-                  ))
-                ) : (
-                  <span className="empty-note">Maak eerst een persona aan.</span>
-                )}
-              </div>
-            </div>
-
-            <div className="meeting-selector-column">
-              <div className="member-section-label secondary">
-                <span>Agents voor vervolgtaken</span>
-                <small>{selectedAgentMembers.length} selected</small>
-              </div>
-              <div className="meeting-selector-list">
-                {agentMeetingMembers.map((member) => (
-                  <button
-                    className={`member-row secondary ${member.selected ? "selected" : ""}`}
-                    key={member.id}
-                    type="button"
-                    onClick={() => toggleMeetingMember(member.id)}
-                  >
-                    <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
-                    <span>
-                      <strong>{member.name}</strong>
-                      <small>{member.handle}</small>
-                    </span>
-                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          {savedMeetings.length ? (
-            <section className="saved-meeting-strip" aria-label="Saved meetings">
-              <div className="member-section-label">
-                <span>Opgeslagen vergaderingen</span>
-                <small>{savedMeetings.length}</small>
-              </div>
-              <div className="saved-meeting-list">
-                {savedMeetings.slice(0, 6).map((item) => (
-                  <button type="button" key={item.meeting_id} onClick={() => void openSavedMeeting(item.meeting_id)}>
-                    <strong>{item.topic || item.meeting_id}</strong>
-                    <small>{formatMeetingType(item.meeting_type)} - {item.summary || item.status || item.updated_at || item.meeting_id}</small>
-                  </button>
-                ))}
+                  ))}
+                </div>
               </div>
             </section>
-          ) : null}
+
+            {savedMeetings.length ? (
+              <section className="saved-meeting-strip" aria-label="Saved meetings">
+                <div className="member-section-label">
+                  <span>Opgeslagen vergaderingen</span>
+                  <small>{savedMeetings.length}</small>
+                </div>
+                <div className="saved-meeting-list">
+                  {savedMeetings.slice(0, 6).map((item) => (
+                    <button type="button" key={item.meeting_id} onClick={() => void openSavedMeeting(item.meeting_id)}>
+                      <strong>{item.topic || item.meeting_id}</strong>
+                      <small>{formatMeetingType(item.meeting_type)} - {item.summary || item.status || item.updated_at || item.meeting_id}</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
 
           <section className="meeting-transcript-flow" aria-label="Meeting transcript">
             {meetingRunning && !rounds.length ? (
@@ -2580,6 +2776,22 @@ function App() {
                   <span className="speaker-lamp live" aria-hidden="true" />
                   <Loader2 size={16} />
                   <span>{activeSpeaker ? `${activeSpeaker.name} is aan het woord` : "Persona's denken sequentieel"}</span>
+                </div>
+                <div className="speaker-thought-card" aria-label="Gedachtenstroom">
+                  <div className="thought-flow-speaker">
+                    <span className="speaker-lamp live" aria-hidden="true" />
+                    <strong>{activeSpeaker?.name || "Volgende spreker"}</strong>
+                    <small>{formatMeetingType(meeting?.meetingType || meetingType)}</small>
+                  </div>
+                  <p>{meetingThoughtNarrative(activeSpeaker, meeting?.meetingType || meetingType)}</p>
+                  <div className="thought-flow-steps">
+                    {meetingThoughtFlow(activeSpeaker, meeting?.meetingType || meetingType).map((step) => (
+                      <div className="thought-step" key={`${step.label}-${step.detail}`}>
+                        <span>{step.label}</span>
+                        <small>{step.detail}</small>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </article>
             ) : null}
@@ -2595,8 +2807,6 @@ function App() {
                         <div className="message-meta">
                           <span>{round.participantName}</span>
                           <span>{formatMeetingPhase(round.phase)}</span>
-                          {round.role ? <span>{round.role}</span> : null}
-                          {round.tone ? <span>{round.tone}</span> : null}
                         </div>
                       </div>
                     </header>
@@ -2636,7 +2846,7 @@ function App() {
     );
   }
 
-  function DevelopmentTeamWorkspace() {
+  function renderDevelopmentTeamWorkspace() {
     const personaCount = selectedPersonaMembers.length;
     const agentIds = selectedAgentMembers.length ? selectedAgentMembers : agentMeetingMembers.filter((member) => member.id === "codex");
     const rounds = devResult?.rounds || [];
@@ -2707,6 +2917,28 @@ function App() {
                 <span>Create agent task</span>
               </button>
             </div>
+            {devResult?.slash_prompt ? (
+              <div className="approval-run-card">
+                <label className="compact-field">
+                  <span>Approval</span>
+                  <input
+                    value={devApproval}
+                    onChange={(event) => setDevApproval(event.target.value)}
+                    placeholder="Akkoord"
+                    autoComplete="off"
+                  />
+                </label>
+                <button
+                  className="meeting-action"
+                  type="button"
+                  onClick={() => void approveAndStartDevelopmentBuild()}
+                  disabled={devLaunchRunning || devApproval.trim() !== "Akkoord"}
+                >
+                  {devLaunchRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                  <span>Start bouwen</span>
+                </button>
+              </div>
+            ) : null}
           </section>
 
           <section className="participant-bar" aria-label="Development team members">
@@ -2819,6 +3051,23 @@ function App() {
                   <span>{devResult.execution || "approval-gated"}</span>
                 </div>
                 <pre>{devResult.slash_prompt}</pre>
+              </article>
+            ) : null}
+            {devLaunchResult ? (
+              <article className="meeting-summary development-command-card">
+                <div className="message-meta">
+                  <span>Build gestart</span>
+                  <span>{String(devLaunchResult.route || devLaunchResult.status || "cockpit")}</span>
+                </div>
+                <StructuredMeetingText text={String(devLaunchResult.response || devLaunchResult.message || devLaunchResult.reason || "De approval-gated Cockpit workflow is gestart.")} />
+              </article>
+            ) : null}
+            {devLaunchError ? (
+              <article className="meeting-turn error">
+                <div className="message-meta">
+                  <span>Build start</span>
+                </div>
+                <p>{devLaunchError}</p>
               </article>
             ) : null}
             {devError ? (
@@ -2986,9 +3235,9 @@ function App() {
 
       <main className={`chat-main ${viewMode === "meeting" || viewMode === "development_team" ? "meeting-main" : ""}`}>
         {viewMode === "meeting" ? (
-          <MeetingWorkspace />
+          renderMeetingWorkspace()
         ) : viewMode === "development_team" ? (
-          <DevelopmentTeamWorkspace />
+          renderDevelopmentTeamWorkspace()
         ) : (
           <>
         <header className="chat-header">
@@ -3558,6 +3807,10 @@ function App() {
               <Sparkles size={17} />
               <span>Agent task</span>
             </button>
+            <button className="meeting-action secondary" type="button" onClick={() => continueMeetingInDevelopmentTeam(true)} disabled={!activeMeeting?.summary || devRunning}>
+              {devRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+              <span>Dev workflow</span>
+            </button>
           </div>
           {activeMeetingId && meetingsById[activeMeetingId]?.transcript ? (
             <div className="meeting-transcript">
@@ -3586,6 +3839,10 @@ function App() {
           <div className="metric-row">
             <span>Files</span>
             <strong>{readyFilePaths.length}</strong>
+          </div>
+          <div className="metric-row">
+            <span>ChatGPT-Codex</span>
+            <strong>{chatgptCodexOption?.configured ? "linked" : "not linked"}</strong>
           </div>
           <div className="metric-row">
             <span>Table</span>
