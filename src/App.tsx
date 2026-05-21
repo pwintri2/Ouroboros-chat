@@ -2669,16 +2669,18 @@ function App() {
   const DEV_TEAM_DEFAULT_PERSONA_IDS = ["de-voorzitter", "de-developer", "de-tester", "de-criticus"];
 
   function resolveDevPersonaIds(personaOverride?: string[]): string[] {
-    const explicit = personaOverride?.length
-      ? personaOverride
-      : selectedPersonaMembers.map((member) => member.id).filter(Boolean);
-    if (explicit.length) {
+    // The dev-team workspace must run the four canonical roles — voorzitter, developer,
+    // tester, criticus — even when the user has unrelated personas (Nina, Poocky, ...)
+    // ticked on the meeting tab. Only a personaOverride that explicitly contains one of
+    // the dev-team personas counts as a deliberate change; otherwise we always seed the
+    // four defaults.
+    const explicit = (personaOverride || []).filter(Boolean);
+    const explicitHasDevTeam = explicit.some((id) => DEV_TEAM_DEFAULT_PERSONA_IDS.includes(id));
+    if (explicit.length && explicitHasDevTeam) {
       return personasById["de-voorzitter"] && !explicit.includes("de-voorzitter")
         ? ["de-voorzitter", ...explicit]
         : explicit;
     }
-    // No explicit selection — default to the four dev-team personas so the user can hit
-    // "Start team" without picking anyone first.
     return DEV_TEAM_DEFAULT_PERSONA_IDS.filter((id) => Boolean(personasById[id]));
   }
 
