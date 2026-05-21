@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { Dispatch, KeyboardEvent, SetStateAction } from "react";
 import {
   AlertCircle,
   Bot,
@@ -9,6 +9,7 @@ import {
   Code2,
   Command,
   FileText,
+  Globe2,
   Image,
   Loader2,
   MessageSquare,
@@ -114,6 +115,7 @@ type Persona = {
     previewUrl?: string;
   };
   knowledgeFiles: PersonaKnowledgeFile[];
+  knowledgeSources: PersonaKnowledgeSource[];
 };
 
 type PersonaKnowledgeFile = {
@@ -122,6 +124,12 @@ type PersonaKnowledgeFile = {
   filename?: string;
   size?: number;
   kind?: string;
+};
+
+type PersonaKnowledgeSource = {
+  url: string;
+  label: string;
+  note?: string;
 };
 
 type StoredPersona = {
@@ -141,6 +149,8 @@ type StoredPersona = {
   model_settings?: Persona["modelSettings"];
   avatar?: Persona["avatar"];
   knowledge_files?: PersonaKnowledgeFile[];
+  knowledge_sources?: PersonaKnowledgeSource[];
+  builtin?: boolean;
   archived?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -169,19 +179,126 @@ type BackendState = {
   label: string;
 };
 
-type ViewMode = "chat" | "persona_builder" | "meeting" | "settings";
+type ViewMode = "chat" | "persona_builder" | "meeting" | "development_team" | "settings";
 type BuilderMode = "create" | "edit" | null;
 type ThreadType = "neutral" | "persona";
 type MeetingStatus = "draft" | "running" | "completed" | "error";
+type MeetingType = "team" | "sprint_planning" | "brainstorm";
+
+type MeetingRound = {
+  id: string;
+  round?: number;
+  phase: string;
+  participantId?: string;
+  participantName: string;
+  role?: string;
+  tone?: string;
+  content: string;
+  createdAt: string;
+  assignmentTrackKey?: string;
+  nextSpeakerId?: string;
+  previousSpeakerId?: string;
+  topicIntent?: string;
+  isFloorControl?: boolean;
+  isIntervention?: boolean;
+};
 
 type Meeting = {
   id: string;
+  backendMeetingId?: string;
   topic: string;
+  meetingType: MeetingType;
+  participants: StoredPersona[];
   personaIds: string[];
   agentIds: string[];
+  rounds: MeetingRound[];
+  summary: string;
   transcript?: string;
   status: MeetingStatus;
   updatedAt: string;
+  error?: string;
+  saved?: boolean;
+};
+
+type SavedMeetingRecord = {
+  meeting_id: string;
+  topic?: string;
+  meeting_type?: MeetingType;
+  status?: string;
+  summary?: string;
+  updated_at?: string;
+  participants?: Array<{ id?: string; name?: string; role?: string }>;
+  agent_ids?: string[];
+};
+
+type DevelopmentTeamRound = {
+  id: string;
+  phase: string;
+  participantId?: string;
+  participantName: string;
+  content: string;
+  createdAt: string;
+};
+
+type DevelopmentTeamResult = {
+  status: string;
+  execution?: string;
+  approval_required?: boolean;
+  approval_phrase?: string;
+  provider?: string;
+  model?: string;
+  agent_command?: string;
+  slash_prompt?: string;
+  safety_note?: string;
+  rounds?: DevelopmentTeamRound[];
+  build_prompt?: string;
+  summary?: string;
+  meeting_id?: string;
+  meeting_type?: string;
+  augmented_prompt?: string;
+};
+
+type DevelopmentTeamIntakeResult = {
+  status: string;
+  needs_clarification: boolean;
+  questions: string[];
+  prompt: string;
+  provider?: string;
+  model?: string;
+};
+
+type ClarificationAnswer = { question: string; answer: string };
+
+type BuildFileWrite = { path: string; bytes_written: number; truncated?: boolean };
+
+type BuildIteration = {
+  iteration: number;
+  developer?: string;
+  tester?: string;
+  critic?: string;
+  files?: BuildFileWrite[];
+  command?: string;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  duration_s?: number;
+  green?: boolean;
+  timed_out?: boolean;
+  chair_verdict?: string;
+  chair_reason?: string;
+  chair_next?: string;
+};
+
+type BuildSessionState = {
+  session_id?: string;
+  workspace_path?: string;
+  max_iterations?: number;
+  iterations: Record<number, BuildIteration>;
+  order: number[];
+  status: "running" | "complete" | "exhausted" | "error" | "idle";
+  finalMessage?: string;
+  error?: string;
+  startedAt?: string;
 };
 
 type MeetingMember = {
@@ -193,6 +310,13 @@ type MeetingMember = {
   source: "agent" | "persona";
   avatar?: Persona["avatar"];
 };
+
+type MeetingTextBlock =
+  | { type: "heading"; text: string }
+  | { type: "paragraph"; text: string }
+  | { type: "keyValue"; label: string; text: string }
+  | { type: "bulletList"; items: string[] }
+  | { type: "numberedList"; items: string[] };
 
 type UploadResponse = {
   files?: Array<{
@@ -212,6 +336,24 @@ type UploadResponse = {
     kind?: string;
     mime_type?: string;
   }>;
+};
+
+type ModelProviderOption = {
+  id: string;
+  label: string;
+  models: string[];
+  default_model?: string;
+  configured?: boolean;
+  local_only?: boolean;
+  key_source?: string;
+  auth_mode?: string;
+  direct_chat?: boolean;
+  agent_runtime_only?: boolean;
+};
+
+type ModelOptionsResponse = {
+  providers?: ModelProviderOption[];
+  brave?: { configured?: boolean; key_source?: string };
 };
 
 const DEFAULT_TOOLS: Record<string, boolean> = {
@@ -283,6 +425,76 @@ const INITIAL_MEMBERS: MeetingMember[] = [
   { id: "deepseek", name: "DeepSeek", handle: "/deepseek", selected: false, online: true, source: "agent" },
 ];
 
+const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
+  {
+    id: "ollama",
+    label: "Ollama local",
+    models: [DEFAULT_MODEL, "gpt-oss:120b-cloud", "llama3.2:latest", "mistral:latest", "qwen2.5:latest", "deepseek-coder:latest", "devstral:latest"],
+    default_model: DEFAULT_MODEL,
+    configured: true,
+    local_only: true,
+  },
+  {
+    id: "anthropic",
+    label: "Claude via Cockpit API key",
+    models: ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-latest"],
+    default_model: "claude-sonnet-4-6",
+    configured: false,
+  },
+  {
+    id: "chatgpt_codex",
+    label: "ChatGPT-Codex abonnement",
+    models: ["gpt-5.2-codex", "gpt-5.1-codex", "gpt-5.0-codex", "o3", "o3-mini", "o4-mini"],
+    default_model: "gpt-5.2-codex",
+    configured: false,
+    auth_mode: "oauth_shared_file",
+    direct_chat: false,
+  },
+  {
+    id: "openai",
+    label: "OpenAI via Cockpit API key",
+    models: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"],
+    default_model: "gpt-5.4-mini",
+    configured: false,
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek via Cockpit API key",
+    models: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+    default_model: "deepseek-chat",
+    configured: false,
+  },
+  {
+    id: "google",
+    label: "Gemini via Cockpit API key",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro"],
+    default_model: "gemini-2.5-flash",
+    configured: false,
+  },
+  {
+    id: "xai",
+    label: "Grok/xAI via Cockpit API key",
+    models: ["grok-3", "grok-3-mini", "grok-3-latest", "grok-2-latest"],
+    default_model: "grok-3",
+    configured: false,
+  },
+  {
+    id: "mistral",
+    label: "Mistral via Cockpit API key",
+    models: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
+    default_model: "mistral-large-latest",
+    configured: false,
+  },
+];
+
+const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-ontwerper", "de-criticus"];
+const MEETING_TYPE_OPTIONS: Array<{ id: MeetingType; label: string; hint: string; icon: "team" | "sprint" | "brainstorm" }> = [
+  { id: "team", label: "Team vergadering", hint: "keuze + eigenaar", icon: "team" },
+  { id: "sprint_planning", label: "Sprint planning", hint: "taak + test + rollback", icon: "sprint" },
+  { id: "brainstorm", label: "Brainstormsessie", hint: "deep search + deep think", icon: "brainstorm" },
+];
+const DEVELOPMENT_PROVIDER_IDS = ["chatgpt_codex", "openai", "google", "ollama"];
+
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -330,6 +542,14 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return payload as T;
+}
+
+function friendlyErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || "Onbekende fout");
+  if (/load failed|failed to fetch|networkerror/i.test(message)) {
+    return "De backend reageerde niet op tijd of de verbinding met 127.0.0.1:8010 werd onderbroken. Probeer opnieuw; trage modelcalls vallen nu terug op transcript-fallbacks.";
+  }
+  return message;
 }
 
 function makeWelcomeMessage(personaName = "Ouroboros", introduction = ""): ChatMessage {
@@ -506,6 +726,19 @@ function timestampValue(value?: string): number {
   return Number.isFinite(time) ? time : 0;
 }
 
+function providerOptionLabel(option: ModelProviderOption): string {
+  const suffix = option.agent_runtime_only
+    ? " (OAuth agent)"
+    : option.configured === false && option.auth_mode?.includes("oauth")
+      ? " (login missing)"
+    : option.configured === false && !option.local_only
+      ? " (key missing)"
+      : option.auth_mode && option.auth_mode !== "api_key_from_subscription" && option.direct_chat === false
+        ? ` (${option.auth_mode})`
+        : "";
+  return `${option.label || option.id}${suffix}`;
+}
+
 function defaultPersona(): Persona {
   return {
     id: undefined,
@@ -531,6 +764,7 @@ function defaultPersona(): Persona {
     tools: { ...DEFAULT_TOOLS },
     avatar: { kind: "initials", color: "#7bdcc3" },
     knowledgeFiles: [],
+    knowledgeSources: [],
   };
 }
 
@@ -577,6 +811,7 @@ function personaFromStored(record: StoredPersona): Persona {
       }
       : { kind: "initials", color: "#7bdcc3" },
     knowledgeFiles: Array.isArray(record.knowledge_files) ? record.knowledge_files : [],
+    knowledgeSources: Array.isArray(record.knowledge_sources) ? record.knowledge_sources : [],
   };
 }
 
@@ -602,9 +837,401 @@ function composeSystemPrompt(persona: Persona): string {
     persona.knowledgeFiles.length
       ? `Knowledge files available: ${persona.knowledgeFiles.map((file) => file.label || file.filename || file.path).join(", ")}.`
       : "",
+    persona.knowledgeSources.length
+      ? `Knowledge links available: ${persona.knowledgeSources.map((source) => `${source.label || source.url}: ${source.url}`).join(", ")}.`
+      : "",
     `Persona: ${persona.name}. Tone: ${persona.tone}. Language: ${persona.language}. Memory: ${persona.memoryEnabled ? persona.memoryMode : "off"}.`,
   ].filter(Boolean);
   return parts.join("\n");
+}
+
+function meetingParticipantFromEvent(event: Record<string, unknown>): Record<string, unknown> {
+  return asRecord(event.participant) || {};
+}
+
+function meetingRoundsFromEvents(events: unknown[], fallbackParticipants: StoredPersona[]): MeetingRound[] {
+  return events
+    .map((event, index): MeetingRound | null => {
+      const record = asRecord(event);
+      if (!record) {
+        return null;
+      }
+      const looksLikeSavedRound =
+        typeof record.content === "string" &&
+        (typeof record.participantName === "string" ||
+          typeof record.participant_name === "string" ||
+          typeof record.participantId === "string" ||
+          typeof record.participant_id === "string");
+      if (record.type !== "participant_turn" && record.type !== "participant_note" && !looksLikeSavedRound) {
+        return null;
+      }
+      const participant = meetingParticipantFromEvent(record);
+      const participantId = participant.id
+        ? String(participant.id)
+        : record.participantId || record.participant_id
+          ? String(record.participantId || record.participant_id)
+          : undefined;
+      const fallback = fallbackParticipants.find((item) => item.id === participantId);
+      const promptContext = asRecord(record.prompt_context) || asRecord(record.promptContext) || {};
+      const phase = String(record.phase || "round");
+      return {
+        id: String(record.id || `${record.meeting_id || "meeting"}-${record.round || 0}-${participantId || index}-${index}`),
+        round: typeof record.round === "number" ? record.round : Number(record.round || 0) || undefined,
+        phase,
+        participantId,
+        participantName: String(record.participantName || record.participant_name || participant.name || fallback?.name || participantId || "Persona"),
+        role: String(record.role || participant.role || fallback?.role || ""),
+        tone: String(record.tone || participant.tone || fallback?.tone || ""),
+        content: String(record.content || ""),
+        createdAt: String(record.createdAt || record.created_at || record.timestamp || nowIso()),
+        assignmentTrackKey: promptContext.assignment_track_key ? String(promptContext.assignment_track_key) : undefined,
+        nextSpeakerId: promptContext.next_speaker ? String(promptContext.next_speaker) : undefined,
+        previousSpeakerId: promptContext.previous_speaker ? String(promptContext.previous_speaker) : undefined,
+        topicIntent: promptContext.topic_intent ? String(promptContext.topic_intent) : undefined,
+        isFloorControl: phase === "floor-control" || Boolean(promptContext.floor_control),
+        isIntervention: phase === "intervention" || promptContext.intervention_reason === "anti_parroting",
+      };
+    })
+    .filter((round): round is MeetingRound => Boolean(round));
+}
+
+function meetingSummaryFromPayload(payload: Record<string, unknown>, events: unknown[]): string {
+  if (typeof payload.summary === "string" && payload.summary.trim()) {
+    return payload.summary.trim();
+  }
+  const summaryEvent = events
+    .map((event) => asRecord(event))
+    .find((event) => event?.type === "meeting_summary");
+  return String(summaryEvent?.summary || summaryEvent?.content || "").trim();
+}
+
+function meetingTranscriptFromRounds(rounds: MeetingRound[], summary: string): string {
+  const body = rounds
+    .map((round) => {
+      const label = round.round ? `Ronde ${round.round} / ${round.phase}` : round.phase;
+      return `${round.participantName} (${label}):\n${round.content}`;
+    })
+    .join("\n\n");
+  return [body, summary ? `Consensus & Actiepunten:\n${summary}` : ""].filter(Boolean).join("\n\n---\n\n");
+}
+
+function isChairParticipant(id?: string, name = "", role = ""): boolean {
+  const normalizedId = String(id || "").toLowerCase();
+  const normalizedName = name.toLowerCase();
+  const normalizedRole = role.toLowerCase();
+  return normalizedId === "de-voorzitter" || normalizedName.includes("voorzitter") || normalizedRole.includes("facilitator");
+}
+
+function formatMeetingType(type?: string): string {
+  return MEETING_TYPE_OPTIONS.find((option) => option.id === type)?.label || "Team vergadering";
+}
+
+function asMeetingType(value?: string): MeetingType {
+  return MEETING_TYPE_OPTIONS.some((option) => option.id === value) ? (value as MeetingType) : "team";
+}
+
+function formatMeetingPhase(phase: string): string {
+  const labels: Record<string, string> = {
+    opening: "opent",
+    input: "brengt in",
+    "chair-bridge": "vat samen",
+    "floor-control": "geeft woord",
+    intervention: "grijpt in",
+    "anti-parrot-redo": "herformuleert",
+    reply: "reageert",
+    closing: "sluit af",
+    "plan-slice": "plant",
+    "plan-bridge": "ordent plan",
+    "plan-check": "checkt plan",
+    research: "verkent",
+    "research-bridge": "clustert",
+    "research-layer": "verdiept aanname",
+    "solution-dive": "stelt voor",
+    "research-synthesis": "synthese",
+    intake: "start",
+    "implementation-route": "route",
+    "test-plan": "testplan",
+    "loop-guard": "bewaakt",
+    brainstorm: "brengt in",
+    discussion: "reageert",
+    round: "spreekt",
+    saved: "notitie",
+  };
+  return labels[phase] || phase;
+}
+
+const MEETING_PHASE_TIMELINE: Record<MeetingType, Array<{ phase: string; label: string; hint: string }>> = {
+  team: [
+    { phase: "opening", label: "Opening", hint: "doel en eerste spreker" },
+    { phase: "input", label: "Inbreng", hint: "standpunt per deelnemer" },
+    { phase: "chair-bridge", label: "Tussenstand", hint: "keuze en spanning" },
+    { phase: "reply", label: "Antwoord", hint: "accepteren, aanpassen, parkeren" },
+    { phase: "closing", label: "Besluit", hint: "eigenaar en volgende stap" },
+  ],
+  sprint_planning: [
+    { phase: "opening", label: "Opening", hint: "sprintdoel en timebox" },
+    { phase: "plan-slice", label: "Plan-slice", hint: "taak, acceptatie, test" },
+    { phase: "plan-bridge", label: "Concept-bord", hint: "volgorde en rollback" },
+    { phase: "plan-check", label: "Delivery-check", hint: "ontbrekende grens" },
+    { phase: "closing", label: "Sprintkaart", hint: "wanneer een agent mag bouwen" },
+  ],
+  brainstorm: [
+    { phase: "opening", label: "Opening", hint: "onderzoekscontract" },
+    { phase: "research", label: "Verkenning", hint: "bronlaag per persona" },
+    { phase: "research-bridge", label: "Clustering", hint: "lagen naast elkaar" },
+    { phase: "research-layer", label: "Verdieping", hint: "aanname en alternatief" },
+    { phase: "solution-dive", label: "Voorstel", hint: "kleine concrete patch" },
+    { phase: "research-synthesis", label: "Synthese", hint: "bouwvolgorde" },
+    { phase: "closing", label: "Afronding", hint: "wat na Akkoord pas mag" },
+  ],
+};
+
+const ASSIGNMENT_TRACK_LABELS: Record<string, string> = {
+  watchdog: "Monitoring-laag",
+  telemetry: "Telemetrie",
+  recovery: "Herstelroute",
+  "status-ui": "Statuspaneel",
+  rollback: "Rollback-register",
+  "circuit-breaker": "Modelpoort",
+  "vertical-slice": "Verticale slice",
+  "contract-first": "Contract-first",
+};
+
+function meetingPhaseTimeline(type: MeetingType): Array<{ phase: string; label: string; hint: string }> {
+  return MEETING_PHASE_TIMELINE[type] || MEETING_PHASE_TIMELINE.team;
+}
+
+function trackLabelFor(key?: string): string {
+  if (!key) return "";
+  return ASSIGNMENT_TRACK_LABELS[key] || key.replace(/[-_]/g, " ");
+}
+
+function cleanMeetingText(value: string): string {
+  return value
+    .replace(/^\s*[-*]\s*\*\*(.+?)\*\*:\s*/u, "$1: ")
+    .replace(/^\s*\*\*(.+?)\*\*\s*$/u, "$1")
+    .replace(/^\s*\*\*(.+?)\*\*:\s*/u, "$1: ")
+    .trim();
+}
+
+function parseMeetingKeyValue(line: string): { label: string; text: string } | null {
+  if (line.includes("://")) return null;
+  const match = line.match(/^([^:：]{3,48})[:：]\s+(.+)$/u);
+  if (!match) return null;
+  const label = cleanMeetingText(match[1]);
+  const text = cleanMeetingText(match[2]);
+  if (!label || !text) return null;
+  return { label, text };
+}
+
+function parseMeetingText(text: string): MeetingTextBlock[] {
+  const lines = text.split(/\r?\n/u);
+  const blocks: MeetingTextBlock[] = [];
+  let paragraph: string[] = [];
+  let list: Extract<MeetingTextBlock, { type: "bulletList" | "numberedList" }> | null = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push({ type: "paragraph", text: paragraph.join(" ") });
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (!list) return;
+    blocks.push(list);
+    list = null;
+  };
+
+  for (const rawLine of lines) {
+    const line = cleanMeetingText(rawLine);
+    if (!line) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^#{1,4}\s+(.+)$/u);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", text: cleanMeetingText(heading[1]) });
+      continue;
+    }
+
+    const bullet = line.match(/^(?:[-*•])\s+(.+)$/u);
+    if (bullet) {
+      flushParagraph();
+      if (!list || list.type !== "bulletList") {
+        flushList();
+        list = { type: "bulletList", items: [] };
+      }
+      list.items.push(cleanMeetingText(bullet[1]));
+      continue;
+    }
+
+    const numbered = line.match(/^\d+[\.)]\s+(.+)$/u);
+    if (numbered) {
+      flushParagraph();
+      if (!list || list.type !== "numberedList") {
+        flushList();
+        list = { type: "numberedList", items: [] };
+      }
+      list.items.push(cleanMeetingText(numbered[1]));
+      continue;
+    }
+
+    const keyValue = parseMeetingKeyValue(line);
+    if (keyValue) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "keyValue", ...keyValue });
+      continue;
+    }
+
+    if (line.endsWith(":") && line.length <= 72 && !line.includes("://")) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", text: line.slice(0, -1).trim() });
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+  return blocks.length ? blocks : [{ type: "paragraph", text: text.trim() }];
+}
+
+function StructuredMeetingText({ text, summary = false }: { text: string; summary?: boolean }) {
+  const blocks = parseMeetingText(text);
+  return (
+    <div className={`structured-meeting-text ${summary ? "summary-text" : ""}`}>
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          return <h3 key={`${block.type}-${index}`}>{block.text}</h3>;
+        }
+        if (block.type === "keyValue") {
+          return (
+            <div className="meeting-kv" key={`${block.type}-${index}`}>
+              <strong>{block.label}</strong>
+              <span>{block.text}</span>
+            </div>
+          );
+        }
+        if (block.type === "bulletList") {
+          return (
+            <ul key={`${block.type}-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${itemIndex}-${item}`}>{item}</li>
+              ))}
+            </ul>
+          );
+        }
+        if (block.type === "numberedList") {
+          return (
+            <ol key={`${block.type}-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${itemIndex}-${item}`}>{item}</li>
+              ))}
+            </ol>
+          );
+        }
+        return <p key={`${block.type}-${index}`}>{block.text}</p>;
+      })}
+    </div>
+  );
+}
+
+function meetingThoughtFlow(member: MeetingMember | undefined, type: MeetingType): Array<{ label: string; detail: string }> {
+  const isChair = isChairParticipant(member?.id, member?.name);
+  if (isChair) {
+    return [
+      { label: "Opent", detail: "doel, contract en eerste spreker" },
+      { label: "Geeft woord", detail: "gerichte beurt met eigen opdracht" },
+      { label: "Sluit", detail: "besluit, plan of onderzoekstap" },
+    ];
+  }
+  if (type === "sprint_planning") {
+    return [
+      { label: "Taak", detail: "kleinste bouwstap met eigenaar" },
+      { label: "Test", detail: "acceptatiecriterium en smoke-run" },
+      { label: "Grens", detail: "rollback, afhankelijkheid, stopregel" },
+    ];
+  }
+  if (type === "brainstorm") {
+    return [
+      { label: "Verkent", detail: "bronlaag, waarneming, onzekerheid" },
+      { label: "Verdiept", detail: "aanname, alternatief, tegenvoorbeeld" },
+      { label: "Stelt voor", detail: "kritiek omzetten in oplossingstest" },
+    ];
+  }
+  return [
+    { label: "Kiest", detail: "standpunt of beslisspanning" },
+    { label: "Weegt", detail: "bewijs, risico, open vraag" },
+    { label: "Besluit", detail: "eigenaar of vervolgstap" },
+  ];
+}
+
+function meetingThoughtNarrative(member: MeetingMember | undefined, type: MeetingType): string {
+  const name = member?.name || "De volgende spreker";
+  const isChair = isChairParticipant(member?.id, member?.name);
+  if (isChair) {
+    if (type === "sprint_planning") {
+      return `${name} opent het sprintcontract, geeft elke beurt een delivery-opdracht en sluit af met taak, test en rollback.`;
+    }
+    if (type === "brainstorm") {
+      return `${name} opent de onderzoeksruimte, stuurt van verkennen naar verdiepen en maakt kritiek productief.`;
+    }
+    return `${name} opent de teamvergadering, bewaakt de besliskeuze en geeft expliciet de volgende spreker het woord.`;
+  }
+  if (type === "brainstorm") {
+    return `${name} verkent eerst de bronlaag en gaat daarna dieper in op aannames, alternatieven en een klein oplossingsexperiment.`;
+  }
+  if (type === "sprint_planning") {
+    return `${name} maakt het voorstel bouwbaar: taak, acceptatiecriterium, testcommando, rollback en stopregel.`;
+  }
+  return `${name} helpt de tafel kiezen met een standpunt, risico, eigenaar of besluitbare vervolgstap.`;
+}
+
+function chairLedSpeakerTimeline(members: MeetingMember[], type: MeetingType): string[] {
+  const ids = members.map((member) => member.id).filter(Boolean);
+  const chair = members.find((member) => isChairParticipant(member.id, member.name));
+  if (!chair) return ids;
+  const contributors = members.filter((member) => member.id !== chair.id);
+  if (!contributors.length) return [chair.id];
+  const timeline = [chair.id];
+  contributors.forEach((member) => {
+    timeline.push(member.id, chair.id);
+  });
+  if (type === "brainstorm") {
+    contributors.forEach((member) => {
+      timeline.push(member.id, chair.id);
+    });
+  }
+  return timeline;
+}
+
+function meetingDevelopmentPrompt(meeting: Meeting): string {
+  const transcript = meeting.rounds
+    .map((round) => `${round.participantName} (${formatMeetingPhase(round.phase)}): ${round.content}`)
+    .join("\n")
+    .slice(0, 5000);
+  const agentIds = meeting.agentIds.length ? meeting.agentIds.map((id) => `/${id}`).join(", ") : "/codex";
+  return [
+    `Ontwikkel/coderequest op basis van consensus: ${meeting.topic}`,
+    `Vergadertype: ${formatMeetingType(meeting.meetingType)}`,
+    `Voorkeursagents: ${agentIds}`,
+    "",
+    "Consensus:",
+    meeting.summary || "Geen consensus beschikbaar.",
+    "",
+    "Transcriptkern:",
+    transcript || "Geen transcript beschikbaar.",
+    "",
+    "Voer dit uit als Ouroboros development team: maak eerst een kort implementatieplan, wijzig klein, draai gerichte tests, laat de voorzitter stoppen bij herhaling of test-loops, en rapporteer bestanden plus verificatie.",
+  ].join("\n");
 }
 
 function App() {
@@ -617,6 +1244,8 @@ function App() {
   const [slashOptions, setSlashOptions] = useState<SlashOption[]>(FALLBACK_SLASH_OPTIONS);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [modelOptions, setModelOptions] = useState<ModelProviderOption[]>(FALLBACK_MODEL_OPTIONS);
+  const [braveConfigured, setBraveConfigured] = useState(false);
   const [backendState, setBackendState] = useState<BackendState>({
     status: "checking",
     label: "checking",
@@ -651,11 +1280,42 @@ function App() {
   const [personaNotice, setPersonaNotice] = useState("");
   const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
   const [memoryDraft, setMemoryDraft] = useState("");
+  const [knowledgeLinkDraft, setKnowledgeLinkDraft] = useState("");
 
   // Meeting specific workspace state
   const [meetingRunning, setMeetingRunning] = useState(false);
+  const [meetingSaving, setMeetingSaving] = useState(false);
+  const [thinkingPersonaId, setThinkingPersonaId] = useState<string | null>(null);
   const [meetingMembers, setMeetingMembers] = useState<MeetingMember[]>(INITIAL_MEMBERS);
   const [meetingTopic, setMeetingTopic] = useState("Review this thread and propose next actions.");
+  const [meetingType, setMeetingType] = useState<MeetingType>("team");
+  const [savedMeetings, setSavedMeetings] = useState<SavedMeetingRecord[]>([]);
+  const [devPrompt, setDevPrompt] = useState("Maak een robuuste implementatie, overleg, test en stop bij herhaling.");
+  const [devProvider, setDevProvider] = useState("ollama");
+  // Default to the lightweight local ouroboros model. A 23B "devstral" cold-start can take
+  // 30-60s, which makes the intake + meeting feel unresponsive. The user can opt up to a
+  // bigger model from the dropdown when they're prepared to wait for it.
+  const [devModel, setDevModel] = useState("ouroboros:latest");
+  const [devMaxIterations, setDevMaxIterations] = useState(3);
+  const [devRunning, setDevRunning] = useState(false);
+  const [devResult, setDevResult] = useState<DevelopmentTeamResult | null>(null);
+  const [devError, setDevError] = useState("");
+  const [devApproval, setDevApproval] = useState("");
+  const [devClarificationQuestions, setDevClarificationQuestions] = useState<string[]>([]);
+  const [devClarificationAnswers, setDevClarificationAnswers] = useState<Record<string, string>>({});
+  const [devIntakeRunning, setDevIntakeRunning] = useState(false);
+  const [devEditableBuildPrompt, setDevEditableBuildPrompt] = useState("");
+  const [devTeamBuildRunning, setDevTeamBuildRunning] = useState(false);
+  const [devTeamBuild, setDevTeamBuild] = useState<BuildSessionState>({
+    iterations: {},
+    order: [],
+    status: "idle",
+  });
+  const [devTeamBuildError, setDevTeamBuildError] = useState("");
+  const [devLaunchRunning, setDevLaunchRunning] = useState(false);
+  const [devLaunchResult, setDevLaunchResult] = useState<Record<string, unknown> | null>(null);
+  const [devLaunchError, setDevLaunchError] = useState("");
+  const personasCountRef = useRef(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -667,12 +1327,25 @@ function App() {
   const meetingPanelRef = useRef<HTMLElement>(null);
   const meetingTopicRef = useRef<HTMLTextAreaElement>(null);
   const statusPanelRef = useRef<HTMLElement>(null);
-  const modelInputRef = useRef<HTMLInputElement>(null);
+  const modelInputRef = useRef<HTMLSelectElement>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
+  const meetingTranscriptRef = useRef<HTMLElement>(null);
+  const meetingTranscriptEndRef = useRef<HTMLDivElement>(null);
 
   const currentThread = threadsById[activeThreadId];
+  const activeMeeting = activeMeetingId ? meetingsById[activeMeetingId] : undefined;
   const messages = currentThread?.messages || [];
-  const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at)), [personasById]);
+  const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => {
+    const leftDefault = DEFAULT_PERSONA_ORDER.indexOf(left.id);
+    const rightDefault = DEFAULT_PERSONA_ORDER.indexOf(right.id);
+    if (leftDefault >= 0 || rightDefault >= 0) {
+      return (leftDefault >= 0 ? leftDefault : 99) - (rightDefault >= 0 ? rightDefault : 99);
+    }
+    if (left.builtin !== right.builtin) {
+      return left.builtin ? -1 : 1;
+    }
+    return timestampValue(right.updated_at || right.created_at) - timestampValue(left.updated_at || left.created_at);
+  }), [personasById]);
 
   function personaForId(personaId?: string, fallback = draftPersona): Persona {
     const record = personasById[personaId || ""];
@@ -690,6 +1363,15 @@ function App() {
   const currentChatPersona = personaForThread(currentThread);
   const currentProvider = currentThread?.provider || currentChatPersona.modelSettings.provider || provider || DEFAULT_PROVIDER;
   const currentModel = currentThread?.modelName || currentChatPersona.modelSettings.name || currentChatPersona.model || model || DEFAULT_MODEL;
+  const currentProviderOption = modelOptions.find((option) => option.id === currentProvider) || modelOptions[0];
+  const currentModelChoices = Array.from(new Set([...(currentProviderOption?.models || []), currentModel].filter(Boolean)));
+  const draftProviderOption = modelOptions.find((option) => option.id === draftPersona.modelSettings.provider) || modelOptions[0];
+  const draftModelChoices = Array.from(new Set([...(draftProviderOption?.models || []), draftPersona.modelSettings.name].filter(Boolean)));
+  const developmentProviderOptions = modelOptions.filter((option) => DEVELOPMENT_PROVIDER_IDS.includes(option.id));
+  const developmentProviders = developmentProviderOptions.length ? developmentProviderOptions : modelOptions;
+  const devProviderOption = developmentProviders.find((option) => option.id === devProvider) || developmentProviders[0];
+  const devModelChoices = Array.from(new Set([...(devProviderOption?.models || []), devModel].filter(Boolean)));
+  const chatgptCodexOption = modelOptions.find((option) => option.id === "chatgpt_codex");
   const readyFilePaths = attachments
     .filter((attachment) => attachment.status === "ready" && attachment.path)
     .map((attachment) => String(attachment.path));
@@ -716,6 +1398,11 @@ function App() {
   const agentMeetingMembers = meetingMembers.filter((member) => member.source === "agent");
   const selectedPersonaMembers = personaMeetingMembers.filter((member) => member.selected);
   const selectedAgentMembers = agentMeetingMembers.filter((member) => member.selected);
+  const activeSpeakerMembers = activeMeeting?.participants.length
+    ? activeMeeting.participants.map((record) => memberFromPersona(record, true))
+    : selectedPersonaMembers;
+  const activeSpeakerIds = chairLedSpeakerTimeline(activeSpeakerMembers, activeMeeting?.meetingType || meetingType);
+  const activeSpeakerKey = activeSpeakerIds.join("|");
   const draftPersonaAvatarSrc = draftPersona.avatar.previewUrl || uploadUrl(draftPersona.avatar.path, draftPersona.avatar.filename);
   const builderTitle =
     builderMode === "create"
@@ -725,20 +1412,47 @@ function App() {
         : "Persona builder";
 
   useEffect(() => {
+    if (!meetingRunning) return;
+    const ids = activeSpeakerKey.split("|").filter(Boolean);
+    if (!ids.length) return;
+    let position = 0;
+    setThinkingPersonaId(ids[position]);
+    const timer = window.setInterval(() => {
+      position = (position + 1) % ids.length;
+      setThinkingPersonaId(ids[position] || ids[0]);
+    }, 2600);
+    return () => window.clearInterval(timer);
+  }, [activeSpeakerKey, meetingRunning]);
+
+  useEffect(() => {
+    personasCountRef.current = Object.keys(personasById).length;
+  }, [personasById]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    fetchJson<Record<string, unknown>>("/api/cockpit/config")
-      .then((payload) => {
+    async function refreshBackendStatus() {
+      try {
+        const payload = await fetchJson<Record<string, unknown>>("/api/cockpit/config");
         if (!cancelled) {
           const status = String(payload.status || "online");
           setBackendState({ status: "online", label: status });
+          if (personasCountRef.current === 0) {
+            void loadPersonas().catch(() => undefined);
+          }
         }
-      })
-      .catch((error: Error) => {
+      } catch (error) {
         if (!cancelled) {
-          setBackendState({ status: "offline", label: error.message || "offline" });
+          const message = error instanceof Error ? error.message : "offline";
+          setBackendState({ status: "offline", label: message || "offline" });
         }
-      });
+      }
+    }
+
+    void refreshBackendStatus();
+    const backendTimer = window.setInterval(() => {
+      void refreshBackendStatus();
+    }, 7000);
 
     fetchJson<unknown>("/api/ouroboros-chat/slash-menu")
       .then((payload) => {
@@ -752,20 +1466,40 @@ function App() {
         }
       });
 
-    loadPersonas().catch(() => {
-      if (!cancelled) {
-        setPersonasById({});
-      }
-    });
+    fetchJson<ModelOptionsResponse>("/api/ouroboros-chat/model-options")
+      .then((payload) => {
+        if (!cancelled) {
+          const providers = Array.isArray(payload.providers) && payload.providers.length ? payload.providers : FALLBACK_MODEL_OPTIONS;
+          setModelOptions(providers);
+          setBraveConfigured(Boolean(payload.brave?.configured));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setModelOptions(FALLBACK_MODEL_OPTIONS);
+          setBraveConfigured(false);
+        }
+      });
+
+    loadSavedMeetings().catch(() => undefined);
+    loadPersonas().catch(() => undefined);
 
     return () => {
       cancelled = true;
+      window.clearInterval(backendTimer);
     };
   }, []);
 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length, activeThreadId, isSending]);
+
+  useEffect(() => {
+    if (viewMode !== "meeting") return;
+    const node = meetingTranscriptEndRef.current;
+    if (!node) return;
+    node.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [activeMeeting?.rounds.length, activeMeeting?.summary, viewMode]);
 
   useEffect(() => {
     setSlashIndex(0);
@@ -784,7 +1518,7 @@ function App() {
       const previousSelected = new Map(previous.map((member) => [member.id, member.selected]));
       const personaMembers = personaRecords
         .filter((record) => !record.archived)
-        .map((record) => memberFromPersona(record, previousSelected.get(record.id) ?? record.id === selectedPersonaId));
+        .map((record) => memberFromPersona(record, previousSelected.get(record.id) ?? (record.id === selectedPersonaId || DEFAULT_PERSONA_ORDER.includes(record.id))));
       const agentMembers = INITIAL_MEMBERS.map((member) => ({
         ...member,
         selected: previousSelected.get(member.id) ?? member.selected,
@@ -832,6 +1566,67 @@ function App() {
   async function loadMemory(personaId: string) {
     const payload = await fetchJson<{ memory?: MemoryItem[] }>(`/api/ouroboros-chat/memory?persona_id=${encodeURIComponent(personaId)}`);
     setMemoryItems(payload.memory || []);
+  }
+
+  async function loadSavedMeetings() {
+    const payload = await fetchJson<{ meetings?: SavedMeetingRecord[] }>("/api/ouroboros-chat/meetings");
+    setSavedMeetings(payload.meetings || []);
+  }
+
+  async function openSavedMeeting(meetingId: string) {
+    const payload = await fetchJson<Record<string, unknown>>(`/api/ouroboros-chat/meetings/${encodeURIComponent(meetingId)}`);
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    const record = asRecord(payload.record) || {};
+    const rawParticipants = Array.isArray(payload.participants)
+      ? payload.participants
+      : Array.isArray(record.participants)
+        ? record.participants
+        : [];
+    const eventParticipants = events
+      .map((event) => meetingParticipantFromEvent(asRecord(event) || {}))
+      .filter((item) => item.id || item.name);
+    const participantRecords = (rawParticipants.length ? rawParticipants : eventParticipants)
+      .map((item) => asRecord(item))
+      .filter((item): item is Record<string, unknown> => Boolean(item))
+      .map((item): StoredPersona => ({
+        id: String(item.id || slugId(String(item.name || "persona"))),
+        name: String(item.name || item.id || "Persona"),
+        role: String(item.role || ""),
+        tone: String(item.tone || ""),
+        rules: Array.isArray(item.rules) ? item.rules.map(String) : [],
+        system_prompt: String(item.system_prompt || ""),
+      }));
+    const rounds = meetingRoundsFromEvents(events, participantRecords);
+    const fallbackRounds = Array.isArray(payload.rounds)
+      ? meetingRoundsFromEvents(payload.rounds, participantRecords)
+      : [];
+    const summary = meetingSummaryFromPayload(payload, events) || String(record.summary || "");
+    const startedEvent = events.map((event) => asRecord(event)).find((event) => event?.type === "meeting_started");
+    const topic = String(record.topic || startedEvent?.topic || "Saved meeting");
+    const savedType = asMeetingType(String(record.meeting_type || startedEvent?.meeting_type || "team"));
+    const id = uid("meeting");
+    setMeetingsById((prev) => ({
+      ...prev,
+      [id]: {
+        id,
+        backendMeetingId: meetingId,
+        topic,
+        meetingType: savedType,
+        participants: participantRecords,
+        personaIds: participantRecords.map((item) => item.id),
+        agentIds: Array.isArray(record.agent_ids) ? record.agent_ids.map(String) : [],
+        rounds: rounds.length ? rounds : fallbackRounds,
+        summary,
+        transcript: String(record.transcript || meetingTranscriptFromRounds(rounds.length ? rounds : fallbackRounds, summary)),
+        status: "completed",
+        updatedAt: String(record.updated_at || nowIso()),
+        saved: true,
+      },
+    }));
+    setActiveMeetingId(id);
+    setMeetingTopic(topic);
+    setMeetingType(savedType);
+    setViewMode("meeting");
   }
 
   function applyPersonaSelection(record: StoredPersona): Persona {
@@ -1192,6 +1987,31 @@ function App() {
     }));
   }
 
+  function addPersonaKnowledgeLink() {
+    const raw = knowledgeLinkDraft.trim();
+    if (!raw) return;
+    const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    let label = url;
+    try {
+      label = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      label = raw;
+    }
+    setDraftPersona((current) => ({
+      ...current,
+      knowledgeSources: [...current.knowledgeSources, { url, label }],
+    }));
+    setKnowledgeLinkDraft("");
+    setPersonaNotice("Kennislink toegevoegd.");
+  }
+
+  function removePersonaKnowledgeLink(url: string) {
+    setDraftPersona((current) => ({
+      ...current,
+      knowledgeSources: current.knowledgeSources.filter((source) => source.url !== url),
+    }));
+  }
+
   async function savePersona({ asNew = false }: { asNew?: boolean } = {}) {
     if (!draftPersona.name.trim() || personaSaving) return;
     setPersonaSaving(true);
@@ -1219,7 +2039,7 @@ function App() {
           model_settings: draftPersona.modelSettings,
           avatar: draftPersona.avatar,
           knowledge_files: draftPersona.knowledgeFiles,
-          knowledge_sources: draftPersona.knowledgeFiles,
+          knowledge_sources: draftPersona.knowledgeSources,
           capabilities: Object.entries(draftPersona.tools).filter(([, enabled]) => enabled).map(([key]) => key),
           tags: ["custom"],
         }),
@@ -1269,6 +2089,7 @@ function App() {
       tools: { ...DEFAULT_TOOLS },
       avatar: { kind: "initials", color: "#f2c97d" },
       knowledgeFiles: [],
+      knowledgeSources: [],
     });
     setBuilderMode("create");
     setPersonaNotice("");
@@ -1319,8 +2140,12 @@ function App() {
         [newId]: {
           id: newId,
           topic: "Review this thread and propose next actions.",
+          meetingType,
+          participants: [],
           personaIds: [],
           agentIds: [],
+          rounds: [],
+          summary: "",
           status: "draft",
           updatedAt: nowIso(),
         }
@@ -1527,7 +2352,7 @@ function App() {
         };
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Chat request failed";
+      const message = friendlyErrorMessage(error);
       setThreadsById((prev) => {
         const thread = prev[threadId];
         if (!thread) return prev;
@@ -1550,17 +2375,27 @@ function App() {
   function insertMeetingPrompt() {
     const handles = selectedAgentMembers.map((member) => member.handle).join(", ");
     const personaNames = selectedPersonaMembers.map((member) => member.name).join(", ");
-    const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
-    setPrompt(`/agents ${topic} Persona meeting: ${personaNames || "geen persona's geselecteerd"}. Follow-up agents: ${handles || "none"}.`);
+    const topic = activeMeeting?.topic || meetingTopic.trim() || "Review this thread and propose next actions.";
+    const summary = activeMeeting?.summary || activeMeeting?.transcript || "Er is nog geen consensus-samenvatting.";
+    setPrompt(`/agents ${topic}\n\nPersona meeting: ${formatMeetingType(activeMeeting?.meetingType || meetingType)} met ${personaNames || "geen persona's geselecteerd"}.\nFollow-up agents: ${handles || "none"}.\n\nConsensus summary:\n${summary}`);
+    setViewMode("chat");
     setSlashOpen(false);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
   async function startPersonaMeeting() {
     const topic = meetingTopic.trim() || "Review this thread and propose next actions.";
-    const participants = selectedPersonaMembers.map((member) => member.id);
+    const selectedParticipants = selectedPersonaMembers.map((member) => member.id);
+    const participants =
+      personasById["de-voorzitter"] && !selectedParticipants.includes("de-voorzitter")
+        ? ["de-voorzitter", ...selectedParticipants]
+        : selectedParticipants;
     if (!participants.length || meetingRunning) return;
+    const selectedParticipantRecords = participants
+      .map((id) => personasById[id])
+      .filter((record): record is StoredPersona => Boolean(record));
     setMeetingRunning(true);
+    setThinkingPersonaId(participants[0] || null);
     setViewMode("meeting");
 
     let meetingId = activeMeetingId;
@@ -1574,20 +2409,125 @@ function App() {
       [meetingId as string]: {
         id: meetingId as string,
         topic,
+        meetingType,
+        participants: selectedParticipantRecords,
         personaIds: participants,
         agentIds: selectedAgentMembers.map((m) => m.id),
+        rounds: [],
+        summary: "",
         status: "running",
         updatedAt: nowIso(),
         transcript: "Meeting started... Waiting for responses...\n"
       }
     }));
 
+    const finalizeFromResult = (result: Record<string, unknown>) => {
+      const events = Array.isArray(result.events) ? result.events : [];
+      const rounds = meetingRoundsFromEvents(events, selectedParticipantRecords);
+      const summary = meetingSummaryFromPayload(result, events);
+      const agentFollowUp = selectedAgentMembers.length
+        ? `\n\nFollow-up agents selected for tasks after the meeting: ${selectedAgentMembers.map((member) => member.handle).join(", ")}. Use the Agent task button to prepare an approval-gated task prompt.`
+        : "";
+      const content = `${meetingTranscriptFromRounds(rounds, summary) || extractResponseText(result)}${agentFollowUp}`;
+      setMeetingsById((prev) => ({
+        ...prev,
+        [meetingId as string]: {
+          ...prev[meetingId as string],
+          backendMeetingId: typeof result.meeting_id === "string" ? result.meeting_id : prev[meetingId as string]?.backendMeetingId,
+          meetingType: asMeetingType(String(result.meeting_type || meetingType)),
+          status: "completed",
+          rounds,
+          summary,
+          transcript: content,
+          updatedAt: nowIso(),
+          saved: true,
+        }
+      }));
+    };
+
+    const recordError = (message: string) => {
+      setMeetingsById((prev) => ({
+        ...prev,
+        [meetingId as string]: {
+          ...prev[meetingId as string],
+          status: "error",
+          error: message,
+          transcript: `Error: ${message}`,
+          updatedAt: nowIso(),
+        }
+      }));
+    };
+
     try {
-      const result = await fetchJson<Record<string, unknown>>("/api/ouroboros-chat/meetings", {
+      const streamed = await streamPersonaMeeting({
+        topic,
+        participants,
+        meetingType,
+        participantRecords: selectedParticipantRecords,
+        meetingId: meetingId as string,
+        setThinkingPersonaId,
+        setMeetingsById,
+      });
+      if (streamed && streamed.finalResult) {
+        finalizeFromResult(streamed.finalResult);
+      } else if (!streamed) {
+        // Streaming not available — fall back to the legacy synchronous endpoint.
+        const result = await fetchJson<Record<string, unknown>>("/api/ouroboros-chat/meetings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic,
+            meeting_type: meetingType,
+            participants,
+            model: model || DEFAULT_MODEL,
+            provider: DEFAULT_PROVIDER,
+            tools: [],
+            allow_tools: false,
+          }),
+        });
+        finalizeFromResult(result);
+      } else {
+        // Stream ended without a `meeting_recorded` envelope — close out with what we have.
+        setMeetingsById((prev) => {
+          const existing = prev[meetingId as string];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [meetingId as string]: {
+              ...existing,
+              status: "completed",
+              updatedAt: nowIso(),
+            },
+          };
+        });
+      }
+      void loadSavedMeetings();
+    } catch (error) {
+      recordError(friendlyErrorMessage(error));
+    } finally {
+      setMeetingRunning(false);
+      setThinkingPersonaId(null);
+    }
+  }
+
+  async function streamPersonaMeeting(params: {
+    topic: string;
+    participants: string[];
+    meetingType: MeetingType;
+    participantRecords: StoredPersona[];
+    meetingId: string;
+    setThinkingPersonaId: (id: string | null) => void;
+    setMeetingsById: Dispatch<SetStateAction<Record<string, Meeting>>>;
+  }): Promise<{ finalResult: Record<string, unknown> | null } | null> {
+    const { topic, participants, meetingType: mt, participantRecords, meetingId, setThinkingPersonaId: setThinking, setMeetingsById: setMeetings } = params;
+    let response: Response;
+    try {
+      response = await fetch(apiUrl("/api/ouroboros-chat/meetings/stream"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({
           topic,
+          meeting_type: mt,
           participants,
           model: model || DEFAULT_MODEL,
           provider: DEFAULT_PROVIDER,
@@ -1595,44 +2535,130 @@ function App() {
           allow_tools: false,
         }),
       });
-      const events = Array.isArray(result.events) ? result.events : [];
-      const notes = events
-        .map((event) => asRecord(event))
-        .filter(Boolean)
-        .map((event) => {
-          const participant = asRecord(event?.participant);
-          const who = participant?.name || event?.type || "meeting";
-          return `${who}: ${event?.content || event?.topic || ""}`.trim();
-        })
-        .filter(Boolean)
-        .join("\n\n");
-      const agentFollowUp = selectedAgentMembers.length
-        ? `\n\nFollow-up agents selected for tasks after the meeting: ${selectedAgentMembers.map((member) => member.handle).join(", ")}. Use the Agent task button to prepare an approval-gated task prompt.`
-        : "";
-      const content = `${notes || extractResponseText(result)}${agentFollowUp}`;
+    } catch {
+      return null;
+    }
+    if (!response.ok || !response.body) {
+      // Backend probably doesn't expose the streaming endpoint — caller should fall back.
+      return response.status === 404 ? null : (() => { throw new Error(`Streaming meeting failed: HTTP ${response.status}`); })();
+    }
 
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    const eventsSoFar: Record<string, unknown>[] = [];
+    let finalResult: Record<string, unknown> | null = null;
+
+    const handleEvent = (eventName: string, payload: Record<string, unknown>) => {
+      const type = String(payload.type || eventName || "");
+      if (type === "meeting_recorded") {
+        // The recorded envelope carries the full final result (events + summary + record path).
+        finalResult = payload;
+        setThinking(null);
+        return;
+      }
+      if (type === "meeting_error") {
+        throw new Error(String(payload.error || "Streaming meeting failed."));
+      }
+      eventsSoFar.push(payload);
+      const rounds = meetingRoundsFromEvents(eventsSoFar, participantRecords);
+      const summary = meetingSummaryFromPayload({}, eventsSoFar);
+      setMeetings((prev) => {
+        const existing = prev[meetingId];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [meetingId]: {
+            ...existing,
+            backendMeetingId:
+              typeof payload.meeting_id === "string" ? String(payload.meeting_id) : existing.backendMeetingId,
+            rounds,
+            summary,
+            updatedAt: nowIso(),
+          },
+        };
+      });
+
+      if (type === "participant_turn") {
+        const participantId =
+          (payload.participant && typeof (payload.participant as Record<string, unknown>).id === "string"
+            ? String((payload.participant as Record<string, unknown>).id)
+            : "") || "";
+        const phase = String(payload.phase || "");
+        const promptContext = (payload.prompt_context as Record<string, unknown>) || {};
+        if (phase === "floor-control" && typeof promptContext.next_speaker === "string") {
+          setThinking(String(promptContext.next_speaker));
+        } else if (participantId) {
+          setThinking(participantId);
+        }
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        let eventName = "";
+        let dataPayload = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataPayload += line.slice(5).trimStart();
+          }
+        }
+        if (!dataPayload) continue;
+        try {
+          const parsed = JSON.parse(dataPayload) as Record<string, unknown>;
+          handleEvent(eventName, parsed);
+        } catch (parseError) {
+          console.warn("Failed to parse SSE frame", parseError);
+        }
+      }
+    }
+
+    return { finalResult };
+  }
+
+  async function saveActiveMeeting() {
+    const meeting = activeMeeting;
+    if (!meeting || meetingSaving) return;
+    const backendMeetingId = meeting.backendMeetingId || uid("manual-meeting");
+    setMeetingSaving(true);
+    try {
+      const payload = await fetchJson<Record<string, unknown>>(`/api/ouroboros-chat/meetings/${encodeURIComponent(backendMeetingId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          frontend_id: meeting.id,
+          topic: meeting.topic,
+          meeting_type: meeting.meetingType,
+          participants: meeting.participants,
+          participant_ids: meeting.personaIds,
+          agent_ids: meeting.agentIds,
+          rounds: meeting.rounds,
+          summary: meeting.summary,
+          transcript: meeting.transcript || meetingTranscriptFromRounds(meeting.rounds, meeting.summary),
+          status: meeting.status === "error" ? "error" : "saved",
+        }),
+      });
+      const savedId = typeof payload.meeting_id === "string" ? payload.meeting_id : backendMeetingId;
       setMeetingsById((prev) => ({
         ...prev,
-        [meetingId as string]: {
-          ...prev[meetingId as string],
-          status: "completed",
-          transcript: content,
+        [meeting.id]: {
+          ...meeting,
+          backendMeetingId: savedId,
+          saved: true,
           updatedAt: nowIso(),
-        }
+        },
       }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Meeting failed";
-      setMeetingsById((prev) => ({
-        ...prev,
-        [meetingId as string]: {
-          ...prev[meetingId as string],
-          status: "error",
-          transcript: `Error: ${message}`,
-          updatedAt: nowIso(),
-        }
-      }));
+      await loadSavedMeetings();
     } finally {
-      setMeetingRunning(false);
+      setMeetingSaving(false);
     }
   }
 
@@ -1642,9 +2668,377 @@ function App() {
     );
   }
 
+  function updateMeetingTopic(value: string) {
+    setMeetingTopic(value);
+    if (!activeMeetingId) return;
+    setMeetingsById((prev) => {
+      const meeting = prev[activeMeetingId];
+      if (!meeting || meeting.status !== "draft") return prev;
+      return {
+        ...prev,
+        [activeMeetingId]: {
+          ...meeting,
+          topic: value,
+          updatedAt: nowIso(),
+        },
+      };
+    });
+  }
+
+  function updateMeetingType(value: MeetingType) {
+    setMeetingType(value);
+    if (!activeMeetingId) return;
+    setMeetingsById((prev) => {
+      const meeting = prev[activeMeetingId];
+      if (!meeting || meeting.status !== "draft") return prev;
+      return {
+        ...prev,
+        [activeMeetingId]: {
+          ...meeting,
+          meetingType: value,
+          updatedAt: nowIso(),
+        },
+      };
+    });
+  }
+
+  function updateDevProvider(value: string) {
+    const option = developmentProviders.find((item) => item.id === value);
+    setDevProvider(value);
+    setDevModel(option?.default_model || option?.models[0] || devModel || DEFAULT_MODEL);
+  }
+
+  const DEV_TEAM_DEFAULT_PERSONA_IDS = ["de-voorzitter", "de-developer", "de-tester", "de-criticus"];
+
+  function resolveDevPersonaIds(personaOverride?: string[]): string[] {
+    // The dev-team workspace must run the four canonical roles — voorzitter, developer,
+    // tester, criticus — even when the user has unrelated personas (Nina, Poocky, ...)
+    // ticked on the meeting tab. Only a personaOverride that explicitly contains one of
+    // the dev-team personas counts as a deliberate change; otherwise we always seed the
+    // four defaults.
+    const explicit = (personaOverride || []).filter(Boolean);
+    const explicitHasDevTeam = explicit.some((id) => DEV_TEAM_DEFAULT_PERSONA_IDS.includes(id));
+    if (explicit.length && explicitHasDevTeam) {
+      return personasById["de-voorzitter"] && !explicit.includes("de-voorzitter")
+        ? ["de-voorzitter", ...explicit]
+        : explicit;
+    }
+    return DEV_TEAM_DEFAULT_PERSONA_IDS.filter((id) => Boolean(personasById[id]));
+  }
+
+  async function startDevelopmentTeam(promptOverride?: string, personaOverride?: string[], agentOverride?: string[]) {
+    const promptText = promptOverride?.trim() || devPrompt.trim() || meetingTopic.trim() || "Maak een robuuste implementatie en draai tests.";
+    const agentIds = agentOverride?.length ? agentOverride : selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    setDevError("");
+    setDevLaunchError("");
+    setDevLaunchResult(null);
+    setDevClarificationAnswers({});
+    setDevClarificationQuestions([]);
+    setDevResult(null);
+    setDevEditableBuildPrompt("");
+    setViewMode("development_team");
+
+    // Step 1 — Intake: chair LLM decides whether the prompt needs clarification before the
+    // four-persona meeting kicks off.
+    setDevIntakeRunning(true);
+    let intake: DevelopmentTeamIntakeResult | null = null;
+    try {
+      intake = await fetchJson<DevelopmentTeamIntakeResult>("/api/ouroboros-chat/development-team/intake", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptText,
+          provider: devProvider,
+          model: devModel,
+        }),
+      });
+    } catch (error) {
+      setDevIntakeRunning(false);
+      setDevError(`Intake mislukt: ${friendlyErrorMessage(error)}`);
+      return;
+    }
+    setDevIntakeRunning(false);
+
+    if (intake?.needs_clarification && intake.questions?.length) {
+      // Show the clarification form. The user fills the answers, clicks "Beantwoord en start
+      // overleg" which calls `runDevelopmentTeamMeeting` with the Q&A bundle.
+      setDevClarificationQuestions(intake.questions);
+      const seeded: Record<string, string> = {};
+      intake.questions.forEach((q) => {
+        seeded[q] = "";
+      });
+      setDevClarificationAnswers(seeded);
+      return;
+    }
+
+    // No clarification needed — go straight to the four-persona meeting.
+    await runDevelopmentTeamMeeting(promptText, resolveDevPersonaIds(personaOverride), agentIds, []);
+  }
+
+  async function runDevelopmentTeamMeeting(
+    promptText: string,
+    personaIds: string[],
+    agentIds: string[],
+    clarifications: ClarificationAnswer[]
+  ) {
+    setDevRunning(true);
+    setDevError("");
+    try {
+      const payload = await fetchJson<DevelopmentTeamResult>("/api/ouroboros-chat/development-team", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptText,
+          persona_ids: personaIds,
+          agent_ids: agentIds,
+          provider: devProvider,
+          model: devModel,
+          max_iterations: devMaxIterations,
+          clarifications,
+        }),
+      });
+      setDevResult(payload);
+      setDevEditableBuildPrompt(payload?.build_prompt || "");
+    } catch (error) {
+      setDevResult(null);
+      setDevError(friendlyErrorMessage(error));
+    } finally {
+      setDevRunning(false);
+    }
+  }
+
+  async function submitDevTeamClarifications() {
+    if (!devClarificationQuestions.length) return;
+    const pairs: ClarificationAnswer[] = devClarificationQuestions.map((question) => ({
+      question,
+      answer: (devClarificationAnswers[question] || "").trim(),
+    }));
+    const promptText = devPrompt.trim() || "Maak een robuuste implementatie en draai tests.";
+    const personaIds = resolveDevPersonaIds();
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    // Clear the form so the UI moves on to the running-meeting state.
+    setDevClarificationQuestions([]);
+    setDevClarificationAnswers({});
+    await runDevelopmentTeamMeeting(promptText, personaIds, agentIds, pairs);
+  }
+
+  function skipDevTeamClarifications() {
+    if (!devClarificationQuestions.length) return;
+    const promptText = devPrompt.trim() || "Maak een robuuste implementatie en draai tests.";
+    const personaIds = resolveDevPersonaIds();
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    setDevClarificationQuestions([]);
+    setDevClarificationAnswers({});
+    void runDevelopmentTeamMeeting(promptText, personaIds, agentIds, []);
+  }
+
+  function continueMeetingInDevelopmentTeam(autoPlan = false) {
+    const meeting = activeMeeting;
+    if (!meeting?.summary) return;
+    const promptText = meetingDevelopmentPrompt(meeting);
+    const personaIds = meeting.personaIds.length ? meeting.personaIds : selectedPersonaMembers.map((member) => member.id);
+    const agentIds = meeting.agentIds.length ? meeting.agentIds : selectedAgentMembers.map((member) => member.id);
+    const safeAgentIds = agentIds.length ? agentIds : ["codex"];
+    setDevPrompt(promptText);
+    setDevResult(null);
+    setDevError("");
+    setDevApproval("");
+    setDevLaunchError("");
+    setDevLaunchResult(null);
+    setMeetingMembers((previous) =>
+      previous.map((member) =>
+        member.source === "agent" && safeAgentIds.includes(member.id)
+          ? { ...member, selected: true }
+          : member
+      )
+    );
+    setViewMode("development_team");
+    if (autoPlan) {
+      void startDevelopmentTeam(promptText, personaIds, safeAgentIds);
+    }
+  }
+
+  function insertDevelopmentPrompt() {
+    if (!devResult?.slash_prompt) return;
+    setPrompt(devResult.slash_prompt);
+    setViewMode("chat");
+    setSlashOpen(false);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  async function startTeamBuild() {
+    // Reset prior build state and open the SSE stream against the new /development-team/build route.
+    const buildPrompt = (devEditableBuildPrompt || devResult?.build_prompt || "").trim();
+    if (!buildPrompt || devTeamBuildRunning) return;
+    setDevTeamBuildRunning(true);
+    setDevTeamBuildError("");
+    setDevTeamBuild({
+      iterations: {},
+      order: [],
+      status: "running",
+      startedAt: nowIso(),
+    });
+    const personaIds = resolveDevPersonaIds();
+    let response: Response;
+    try {
+      response = await fetch(apiUrl("/api/ouroboros-chat/development-team/build"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({
+          build_prompt: buildPrompt,
+          persona_ids: personaIds,
+          clarifications: [],
+          provider: devProvider,
+          model: devModel,
+          max_iterations: Math.max(1, Math.min(6, devMaxIterations || 4)),
+          test_timeout_seconds: 120,
+        }),
+      });
+    } catch (error) {
+      setDevTeamBuildRunning(false);
+      setDevTeamBuildError(friendlyErrorMessage(error));
+      setDevTeamBuild((prev) => ({ ...prev, status: "error", error: friendlyErrorMessage(error) }));
+      return;
+    }
+    if (!response.ok || !response.body) {
+      const detail = response.status === 404
+        ? "De build-route ontbreekt — herbouw de backend (commit fe514ab of nieuwer)."
+        : `Build start mislukt: HTTP ${response.status}`;
+      setDevTeamBuildRunning(false);
+      setDevTeamBuildError(detail);
+      setDevTeamBuild((prev) => ({ ...prev, status: "error", error: detail }));
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    const applyEvent = (payload: Record<string, unknown>) => {
+      const type = String(payload.type || "");
+      setDevTeamBuild((previous) => {
+        const next: BuildSessionState = {
+          ...previous,
+          iterations: { ...previous.iterations },
+          order: [...previous.order],
+        };
+        if (type === "build_started") {
+          next.session_id = String(payload.session_id || "");
+          next.workspace_path = String(payload.workspace_path || "");
+          next.max_iterations = Number(payload.max_iterations || 0) || undefined;
+          next.status = "running";
+          return next;
+        }
+        const iterationNum = Number(payload.iteration);
+        if (Number.isFinite(iterationNum) && iterationNum > 0) {
+          const existing = next.iterations[iterationNum] || { iteration: iterationNum };
+          if (type === "developer_turn") existing.developer = String(payload.content || "");
+          if (type === "files_written") existing.files = (payload.files as BuildFileWrite[]) || [];
+          if (type === "tester_turn") existing.tester = String(payload.content || "");
+          if (type === "test_run") {
+            existing.command = String(payload.command || "");
+            existing.exit_code = Number(payload.exit_code);
+            existing.stdout = String(payload.stdout || "");
+            existing.stderr = String(payload.stderr || "");
+            existing.duration_s = Number(payload.duration_s);
+            existing.green = Boolean(payload.green);
+            existing.timed_out = Boolean(payload.timed_out);
+          }
+          if (type === "critic_turn") existing.critic = String(payload.content || "");
+          if (type === "chair_review") {
+            existing.chair_verdict = String(payload.verdict || "");
+            existing.chair_reason = String(payload.reason || "");
+            existing.chair_next = String(payload.next_subtask || "");
+          }
+          next.iterations[iterationNum] = existing;
+          if (!next.order.includes(iterationNum)) next.order.push(iterationNum);
+        }
+        if (type === "build_complete") {
+          next.status = "complete";
+          next.finalMessage = `Build groen na ${payload.iterations || "?"} iteratie(s).`;
+        }
+        if (type === "build_exhausted") {
+          next.status = "exhausted";
+          next.finalMessage = `Build niet groen na ${payload.iterations || "?"} iteratie(s); zie laatste test-output.`;
+        }
+        if (type === "build_error") {
+          next.status = "error";
+          next.error = String(payload.error || "Onbekende fout.");
+        }
+        return next;
+      });
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          let dataPayload = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) {
+              dataPayload += line.slice(5).trimStart();
+            }
+          }
+          if (!dataPayload) continue;
+          try {
+            applyEvent(JSON.parse(dataPayload));
+          } catch (parseError) {
+            console.warn("Failed to parse build SSE frame", parseError);
+          }
+        }
+      }
+    } finally {
+      setDevTeamBuildRunning(false);
+    }
+  }
+
+  async function approveAndStartDevelopmentBuild() {
+    if (!devResult?.slash_prompt || devApproval.trim() !== "Akkoord" || devLaunchRunning) return;
+    setDevLaunchRunning(true);
+    setDevLaunchError("");
+    setDevLaunchResult(null);
+    // If the user edited the build_prompt textarea, splice that text in instead of the
+    // build_prompt the meeting produced. The slash-command prefix and protocol block stay.
+    const command = devResult.agent_command || "/codex";
+    const edited = (devEditableBuildPrompt || "").trim();
+    const original = (devResult.build_prompt || "").trim();
+    let finalSlashPrompt = devResult.slash_prompt;
+    if (edited && edited !== original) {
+      const parts = devResult.slash_prompt.split("\n\n---\n", 2);
+      const protocol = parts.length > 1 ? `\n\n---\n${parts[1]}` : "";
+      finalSlashPrompt = `${command} ${edited}${protocol}`;
+    }
+    try {
+      const payload = await fetchJson<Record<string, unknown>>("/api/cockpit/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: finalSlashPrompt,
+          approval: "Akkoord",
+          provider: devProvider,
+          model: devModel,
+        }),
+      });
+      setDevLaunchResult(payload);
+    } catch (error) {
+      setDevLaunchError(friendlyErrorMessage(error));
+    } finally {
+      setDevLaunchRunning(false);
+    }
+  }
+
   function activateRail(target: ViewMode) {
     if (target === "meeting") {
       openMeetingTable();
+      return;
+    }
+    if (target === "development_team") {
+      setViewMode("development_team");
       return;
     }
     if (target === "persona_builder" && builderMode === null) {
@@ -1666,6 +3060,788 @@ function App() {
       statusPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       modelInputRef.current?.focus();
     }, 0);
+  }
+
+  function renderMeetingWorkspace() {
+    const meeting = activeMeeting;
+    const activeParticipantMembers = (meeting?.participants || []).map((record) => memberFromPersona(record, true));
+    const participantBarMembers = activeParticipantMembers.length ? activeParticipantMembers : selectedPersonaMembers;
+    const activeSpeaker = participantBarMembers.find((member) => member.id === thinkingPersonaId);
+    const rounds = meeting?.rounds || [];
+    const summary = meeting?.summary || "";
+    const canStart = selectedPersonaMembers.length > 0 && !meetingRunning;
+    const meetingTypeForView: MeetingType = meeting?.meetingType || meetingType;
+    const phaseTimeline = meetingPhaseTimeline(meetingTypeForView);
+    const seenPhases = new Set(rounds.map((round) => round.phase));
+    const tracksByPersonaId = new Map<string, string>();
+    rounds.forEach((round) => {
+      if (round.participantId && round.assignmentTrackKey && !tracksByPersonaId.has(round.participantId)) {
+        tracksByPersonaId.set(round.participantId, round.assignmentTrackKey);
+      }
+    });
+    const latestPhase = (() => {
+      for (let index = rounds.length - 1; index >= 0; index -= 1) {
+        const round = rounds[index];
+        if (round.phase && round.phase !== "floor-control" && round.phase !== "intervention") {
+          return round.phase;
+        }
+      }
+      return "";
+    })();
+
+    return (
+      <section className="meeting-workspace" aria-label="Meeting workspace">
+        <header className="meeting-workspace-header">
+          <div className="chat-title-group">
+            <span className="eyebrow">Ouroboros Meeting</span>
+            <h1>{meeting?.topic || meetingTopic || "Persona table"}</h1>
+            <small>{formatMeetingType(meeting?.meetingType || meetingType)}</small>
+          </div>
+          <div className={`meeting-status-pill ${meeting?.status || "draft"}`}>
+            {meetingRunning ? <Loader2 size={15} /> : <Users size={15} />}
+            <span>{meeting?.status || "draft"}</span>
+          </div>
+        </header>
+
+        <div className="meeting-workspace-body">
+          <div className="meeting-config-stack">
+            <section className="meeting-setup-band">
+              <label className="field meeting-topic-field">
+                <span>Topic</span>
+                <textarea
+                  ref={meetingTopicRef}
+                  value={meetingTopic}
+                  onChange={(event) => updateMeetingTopic(event.target.value)}
+                  rows={3}
+                />
+              </label>
+              <div className="meeting-type-segment" role="tablist" aria-label="Vergadertype">
+                {MEETING_TYPE_OPTIONS.map((option) => {
+                  const Icon = option.icon === "sprint" ? Command : option.icon === "brainstorm" ? Sparkles : Users;
+                  return (
+                    <button
+                      className={meetingType === option.id ? "active" : ""}
+                      type="button"
+                      key={option.id}
+                      onClick={() => updateMeetingType(option.id)}
+                    >
+                      <Icon size={15} />
+                      <span className="meeting-type-copy">
+                        <span>{option.label}</span>
+                        <small>{option.hint}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="meeting-command-row">
+                <button
+                  className="meeting-action"
+                  type="button"
+                  onClick={() => void startPersonaMeeting()}
+                  disabled={!canStart}
+                >
+                  {meetingRunning ? <Loader2 size={17} /> : <Users size={17} />}
+                  <span>Start meeting</span>
+                </button>
+                <button
+                  className="meeting-action secondary"
+                  type="button"
+                  onClick={insertMeetingPrompt}
+                  disabled={!summary}
+                >
+                  <Sparkles size={17} />
+                  <span>Create agent task</span>
+                </button>
+                <button
+                  className="meeting-action secondary"
+                  type="button"
+                  onClick={() => continueMeetingInDevelopmentTeam(true)}
+                  disabled={!summary || devRunning}
+                >
+                  {devRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                  <span>Dev workflow</span>
+                </button>
+                <button
+                  className="meeting-action secondary"
+                  type="button"
+                  onClick={() => void saveActiveMeeting()}
+                  disabled={!meeting || meetingSaving || (!rounds.length && !summary)}
+                >
+                  {meetingSaving ? <Loader2 size={17} /> : <FileText size={17} />}
+                  <span>Save meeting</span>
+                </button>
+              </div>
+            </section>
+
+            <section className="participant-bar" aria-label="Selected meeting personas">
+              {participantBarMembers.length ? (
+                participantBarMembers.map((member) => {
+                  const isChair = isChairParticipant(member.id, member.name);
+                  const trackKey = !isChair ? tracksByPersonaId.get(member.id) || "" : "";
+                  const trackLabel = trackLabelFor(trackKey);
+                  return (
+                    <button
+                      className={`participant-chip ${thinkingPersonaId === member.id ? "thinking" : ""} ${isChair ? "chair-chip" : ""}`}
+                      type="button"
+                      key={member.id}
+                      onClick={() => toggleMeetingMember(member.id)}
+                      title={member.name + (trackLabel ? ` — werkt aan: ${trackLabel}` : "")}
+                    >
+                      <span className={`speaker-lamp ${thinkingPersonaId === member.id ? "live" : ""}`} aria-hidden="true" />
+                      <span
+                        className={`member-avatar ${member.online ? "online" : ""}`}
+                        style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                      >
+                        {member.avatar?.kind === "image" ? (
+                          <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                        ) : (
+                          initials(member.name)
+                        )}
+                      </span>
+                      <span className="participant-chip-body">
+                        <strong>{member.name}</strong>
+                        <small className={thinkingPersonaId === member.id ? "chip-thought-loop" : ""}>
+                          {thinkingPersonaId === member.id
+                            ? meetingThoughtNarrative(member, meetingTypeForView)
+                            : isChair
+                              ? "leidt gesprek"
+                              : "deelnemer"}
+                        </small>
+                        {trackLabel ? <span className="track-badge" aria-label={`Werkt aan ${trackLabel}`}>{trackLabel}</span> : null}
+                      </span>
+                    </button>
+                  );
+                })
+              ) : (
+                <span className="empty-note">Selecteer persona's voor de vergadering.</span>
+              )}
+            </section>
+
+            <section className="meeting-selector-grid" aria-label="Meeting selection">
+              <div className="meeting-selector-column">
+                <div className="member-section-label">
+                  <span>Persona's</span>
+                  <small>{selectedPersonaMembers.length} selected</small>
+                </div>
+                <div className="meeting-selector-list">
+                  {personaMeetingMembers.length ? (
+                    personaMeetingMembers.map((member) => (
+                      <button
+                        className={`member-row ${member.selected ? "selected" : ""}`}
+                        key={member.id}
+                        type="button"
+                        onClick={() => toggleMeetingMember(member.id)}
+                      >
+                        <span
+                          className={`member-avatar ${member.online ? "online" : ""}`}
+                          style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                        >
+                          {member.avatar?.kind === "image" ? (
+                            <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" />
+                          ) : (
+                            initials(member.name)
+                          )}
+                        </span>
+                        <span>
+                          <strong>{member.name}</strong>
+                          <small>persona</small>
+                        </span>
+                        {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                      </button>
+                    ))
+                  ) : (
+                    <span className="empty-note">Maak eerst een persona aan.</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="meeting-selector-column">
+                <div className="member-section-label secondary">
+                  <span>Agents voor vervolgtaken</span>
+                  <small>{selectedAgentMembers.length} selected</small>
+                </div>
+                <div className="meeting-selector-list">
+                  {agentMeetingMembers.map((member) => (
+                    <button
+                      className={`member-row secondary ${member.selected ? "selected" : ""}`}
+                      key={member.id}
+                      type="button"
+                      onClick={() => toggleMeetingMember(member.id)}
+                    >
+                      <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
+                      <span>
+                        <strong>{member.name}</strong>
+                        <small>{member.handle}</small>
+                      </span>
+                      {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            {savedMeetings.length ? (
+              <section className="saved-meeting-strip" aria-label="Saved meetings">
+                <div className="member-section-label">
+                  <span>Opgeslagen vergaderingen</span>
+                  <small>{savedMeetings.length}</small>
+                </div>
+                <div className="saved-meeting-list">
+                  {savedMeetings.slice(0, 6).map((item) => (
+                    <button type="button" key={item.meeting_id} onClick={() => void openSavedMeeting(item.meeting_id)}>
+                      <strong>{item.topic || item.meeting_id}</strong>
+                      <small>{formatMeetingType(item.meeting_type)} - {item.summary || item.status || item.updated_at || item.meeting_id}</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
+
+          <section className="meeting-transcript-flow" aria-label="Meeting transcript" ref={meetingTranscriptRef}>
+            <nav className="meeting-phase-timeline" aria-label="Vergaderagenda">
+              {phaseTimeline.map((step, index) => {
+                const reached = seenPhases.has(step.phase);
+                const isCurrent = step.phase === latestPhase;
+                return (
+                  <div
+                    key={step.phase}
+                    className={`phase-step ${reached ? "reached" : ""} ${isCurrent ? "current" : ""}`}
+                    aria-current={isCurrent ? "step" : undefined}
+                  >
+                    <span className="phase-dot" aria-hidden="true">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
+                    <span className="phase-copy">
+                      <strong>{step.label}</strong>
+                      <small>{step.hint}</small>
+                    </span>
+                  </div>
+                );
+              })}
+            </nav>
+            {meetingRunning && !rounds.length ? (
+              <article className="meeting-turn pending">
+                <div className="message-meta">
+                  <span>Meeting runner</span>
+                  <span>running</span>
+                </div>
+                <div className="pending-line">
+                  <span className="speaker-lamp live" aria-hidden="true" />
+                  <Loader2 size={16} />
+                  <span>{activeSpeaker ? `${activeSpeaker.name} is aan het woord` : "Persona's denken sequentieel"}</span>
+                </div>
+                <div className="speaker-thought-card" aria-label="Gedachtenstroom">
+                  <div className="thought-flow-speaker">
+                    <span className="speaker-lamp live" aria-hidden="true" />
+                    <strong>{activeSpeaker?.name || "Volgende spreker"}</strong>
+                    <small>{formatMeetingType(meeting?.meetingType || meetingType)}</small>
+                  </div>
+                  <p>{meetingThoughtNarrative(activeSpeaker, meeting?.meetingType || meetingType)}</p>
+                  <div className="thought-flow-steps">
+                    {meetingThoughtFlow(activeSpeaker, meeting?.meetingType || meetingType).map((step) => (
+                      <div className="thought-step" key={`${step.label}-${step.detail}`}>
+                        <span>{step.label}</span>
+                        <small>{step.detail}</small>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </article>
+            ) : null}
+            {rounds.length ? (
+              rounds.map((round) => {
+                const isActiveSpeaker = meetingRunning && thinkingPersonaId === round.participantId;
+                const isChairTurn = isChairParticipant(round.participantId, round.participantName, round.role);
+                if (round.isFloorControl && !round.isIntervention) {
+                  const nextParticipant = participantBarMembers.find((member) => member.id === round.nextSpeakerId);
+                  const nextTrack = trackLabelFor(nextParticipant ? tracksByPersonaId.get(nextParticipant.id) : "");
+                  return (
+                    <div className="meeting-handoff" key={round.id} role="separator" aria-label="Voorzitter geeft het woord">
+                      <span className="handoff-from">{round.participantName}</span>
+                      <span className="handoff-arrow" aria-hidden="true">→</span>
+                      <span className="handoff-to">
+                        {nextParticipant?.name || "volgende spreker"}
+                        {nextTrack ? <em className="handoff-track">{nextTrack}</em> : null}
+                      </span>
+                      <span className="handoff-line">{round.content}</span>
+                    </div>
+                  );
+                }
+                const trackLabel = trackLabelFor(round.assignmentTrackKey);
+                return (
+                  <article className={`meeting-turn ${isActiveSpeaker ? "speaking" : ""} ${isChairTurn ? "chair-turn" : ""} ${round.isIntervention ? "intervention-turn" : ""}`} key={round.id}>
+                    <header className="meeting-turn-header">
+                      <div className="meeting-speaker">
+                        <span className={`speaker-lamp ${isActiveSpeaker ? "live" : "resting"}`} aria-hidden="true" />
+                        <div className="message-meta">
+                          <span>{round.participantName}</span>
+                          <span>{formatMeetingPhase(round.phase)}</span>
+                        </div>
+                      </div>
+                      {trackLabel ? <span className="turn-track-pill">{trackLabel}</span> : null}
+                    </header>
+                    <StructuredMeetingText text={round.content} />
+                  </article>
+                );
+              })
+            ) : !meetingRunning ? (
+              <article className="meeting-turn empty">
+                <div className="message-meta">
+                  <span>Transcript</span>
+                  <span>wacht op start</span>
+                </div>
+                <p>Selecteer persona's, kies een topic en start de vergadering.</p>
+              </article>
+            ) : null}
+            {summary ? (
+              <article className="meeting-summary">
+                <div className="message-meta">
+                  <span>Consensus & Actiepunten</span>
+                  {meeting?.backendMeetingId ? <span>{meeting.backendMeetingId}</span> : null}
+                </div>
+                <StructuredMeetingText text={summary} summary />
+              </article>
+            ) : null}
+            {meeting?.error ? (
+              <article className="meeting-turn error">
+                <div className="message-meta">
+                  <span>Error</span>
+                </div>
+                <p>{meeting.error}</p>
+              </article>
+            ) : null}
+            <div ref={meetingTranscriptEndRef} aria-hidden="true" />
+          </section>
+        </div>
+      </section>
+    );
+  }
+
+  function renderDevelopmentTeamWorkspace() {
+    const personaCount = selectedPersonaMembers.length;
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers : agentMeetingMembers.filter((member) => member.id === "codex");
+    const rounds = devResult?.rounds || [];
+
+    return (
+      <section className="meeting-workspace development-workspace" aria-label="Development team workspace">
+        <header className="meeting-workspace-header">
+          <div className="chat-title-group">
+            <span className="eyebrow">Ouroboros Development Team</span>
+            <h1>{devPrompt || "Agentisch coderen"}</h1>
+            <small>{devProvider} / {devModel}</small>
+          </div>
+          <div className={`meeting-status-pill ${devRunning ? "running" : devResult ? "completed" : devError ? "error" : "draft"}`}>
+            {devRunning ? <Loader2 size={15} /> : <Code2 size={15} />}
+            <span>{devRunning ? "running" : devResult ? "planned" : devError ? "error" : "draft"}</span>
+          </div>
+        </header>
+
+        <div className="meeting-workspace-body">
+          <div className="meeting-config-stack">
+          <section className="meeting-setup-band development-setup-band">
+            <label className="field meeting-topic-field">
+              <span>Prompt</span>
+              <textarea
+                value={devPrompt}
+                onChange={(event) => setDevPrompt(event.target.value)}
+                rows={4}
+              />
+            </label>
+            <div className="development-model-grid">
+              <label className="compact-field">
+                <span>Provider</span>
+                <select value={devProvider} onChange={(event) => updateDevProvider(event.target.value)}>
+                  {developmentProviders.map((option) => (
+                    <option value={option.id} key={option.id}>
+                      {providerOptionLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="compact-field">
+                <span>Model</span>
+                <select value={devModel} onChange={(event) => setDevModel(event.target.value)}>
+                  {devModelChoices.map((item) => (
+                    <option value={item} key={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="compact-field">
+                <span>Iteraties</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={devMaxIterations}
+                  onChange={(event) => setDevMaxIterations(Number(event.target.value) || 3)}
+                />
+              </label>
+            </div>
+            <div className="meeting-command-row">
+              <button
+                className="meeting-action"
+                type="button"
+                onClick={() => void startDevelopmentTeam()}
+                disabled={devRunning || devIntakeRunning || devClarificationQuestions.length > 0}
+              >
+                {devRunning || devIntakeRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                <span>
+                  {devIntakeRunning
+                    ? "Voorzitter denkt na..."
+                    : devRunning
+                      ? "Team overlegt..."
+                      : "Start team"}
+                </span>
+              </button>
+              <button className="meeting-action secondary" type="button" onClick={insertDevelopmentPrompt} disabled={!devResult?.slash_prompt}>
+                <Sparkles size={17} />
+                <span>Create agent task</span>
+              </button>
+            </div>
+
+            {devClarificationQuestions.length > 0 ? (
+              <div className="dev-clarification-card" role="dialog" aria-label="Verduidelijkingsvragen van de voorzitter">
+                <div className="dev-clarification-header">
+                  <strong>De voorzitter heeft eerst een paar vragen</strong>
+                  <small>Beantwoord wat je weet — wat je open laat mag het team zelf invullen.</small>
+                </div>
+                {devClarificationQuestions.map((question, index) => (
+                  <label className="dev-clarification-row" key={`${question}-${index}`}>
+                    <span>{question}</span>
+                    <textarea
+                      value={devClarificationAnswers[question] || ""}
+                      onChange={(event) =>
+                        setDevClarificationAnswers((previous) => ({
+                          ...previous,
+                          [question]: event.target.value,
+                        }))
+                      }
+                      rows={2}
+                      placeholder="Jouw antwoord..."
+                    />
+                  </label>
+                ))}
+                <div className="dev-clarification-actions">
+                  <button
+                    className="meeting-action"
+                    type="button"
+                    onClick={() => void submitDevTeamClarifications()}
+                    disabled={devRunning}
+                  >
+                    {devRunning ? <Loader2 size={17} /> : <Sparkles size={17} />}
+                    <span>Beantwoord en start overleg</span>
+                  </button>
+                  <button
+                    className="meeting-action secondary"
+                    type="button"
+                    onClick={() => skipDevTeamClarifications()}
+                    disabled={devRunning}
+                  >
+                    <Code2 size={17} />
+                    <span>Sla over, team mag aannames maken</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {devResult?.build_prompt ? (
+              <div className="dev-build-prompt-card">
+                <div className="dev-build-prompt-header">
+                  <strong>Bouwprompt voor de uitvoerende agent</strong>
+                  <small>Pas aan als je iets wil verfijnen voordat het team gaat bouwen of voordat je {devResult.agent_command || "/codex"} laat lopen.</small>
+                </div>
+                <textarea
+                  className="dev-build-prompt-textarea"
+                  value={devEditableBuildPrompt}
+                  onChange={(event) => setDevEditableBuildPrompt(event.target.value)}
+                  rows={Math.min(12, Math.max(4, devEditableBuildPrompt.split("\n").length + 1))}
+                />
+                <div className="dev-build-prompt-actions">
+                  <button
+                    className="meeting-action"
+                    type="button"
+                    onClick={() => void startTeamBuild()}
+                    disabled={devTeamBuildRunning || !(devEditableBuildPrompt || devResult.build_prompt)}
+                  >
+                    {devTeamBuildRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                    <span>{devTeamBuildRunning ? "Team bouwt..." : "Bouw uit met team (Aider-modus)"}</span>
+                  </button>
+                  <small className="dev-build-prompt-hint">
+                    Het team schrijft files in een sandbox onder <code>data/dev-team-builds/</code>, draait de testcommando's
+                    daar, en itereert tot de test groen is of {devMaxIterations} pogingen voorbij zijn.
+                  </small>
+                </div>
+              </div>
+            ) : null}
+
+            {devTeamBuildError ? (
+              <div className="dev-build-error">
+                <strong>Build kon niet starten</strong>
+                <small>{devTeamBuildError}</small>
+              </div>
+            ) : null}
+
+            {devResult?.slash_prompt ? (
+              <div className="approval-run-card">
+                <label className="compact-field">
+                  <span>Approval</span>
+                  <input
+                    value={devApproval}
+                    onChange={(event) => setDevApproval(event.target.value)}
+                    placeholder="Akkoord"
+                    autoComplete="off"
+                  />
+                </label>
+                <button
+                  className="meeting-action"
+                  type="button"
+                  onClick={() => void approveAndStartDevelopmentBuild()}
+                  disabled={devLaunchRunning || devApproval.trim() !== "Akkoord"}
+                >
+                  {devLaunchRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                  <span>Start bouwen</span>
+                </button>
+              </div>
+            ) : null}
+          </section>
+
+          <section className="participant-bar" aria-label="Development team members">
+            {[...selectedPersonaMembers, ...agentIds].map((member) => (
+              <button
+                className={`participant-chip ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
+                type="button"
+                key={`${member.source}-${member.id}`}
+                onClick={() => toggleMeetingMember(member.id)}
+                title={member.name}
+              >
+                <span className={`speaker-lamp ${devRunning ? "live" : "resting"}`} aria-hidden="true" />
+                <span
+                  className={`member-avatar ${member.online ? "online" : ""}`}
+                  style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                >
+                  {member.avatar?.kind === "image" ? <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" /> : initials(member.name)}
+                </span>
+                <span>
+                  <strong>{member.name}</strong>
+                  <small>{member.source === "agent" ? member.handle : isChairParticipant(member.id, member.name) ? "voorzitter" : "persona"}</small>
+                </span>
+              </button>
+            ))}
+            {!personaCount ? <span className="empty-note">Selecteer persona's of gebruik de standaard voorzitter.</span> : null}
+          </section>
+
+          <section className="meeting-selector-grid" aria-label="Development team selection">
+            <div className="meeting-selector-column">
+              <div className="member-section-label">
+                <span>Persona's</span>
+                <small>{selectedPersonaMembers.length} selected</small>
+              </div>
+              <div className="meeting-selector-list">
+                {personaMeetingMembers.map((member) => (
+                  <button
+                    className={`member-row ${member.selected ? "selected" : ""}`}
+                    key={member.id}
+                    type="button"
+                    onClick={() => toggleMeetingMember(member.id)}
+                  >
+                    <span
+                      className={`member-avatar ${member.online ? "online" : ""}`}
+                      style={{ backgroundColor: member.avatar?.kind === "initials" ? member.avatar.color : undefined }}
+                    >
+                      {member.avatar?.kind === "image" ? <img src={uploadUrl(member.avatar.path, member.avatar.filename)} alt="" /> : initials(member.name)}
+                    </span>
+                    <span>
+                      <strong>{member.name}</strong>
+                      <small>persona</small>
+                    </span>
+                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="meeting-selector-column">
+              <div className="member-section-label secondary">
+                <span>CLI agents</span>
+                <small>{selectedAgentMembers.length || 1} selected</small>
+              </div>
+              <div className="meeting-selector-list">
+                {agentMeetingMembers.map((member) => (
+                  <button
+                    className={`member-row secondary ${member.selected ? "selected" : ""}`}
+                    key={member.id}
+                    type="button"
+                    onClick={() => toggleMeetingMember(member.id)}
+                  >
+                    <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
+                    <span>
+                      <strong>{member.name}</strong>
+                      <small>{member.handle}</small>
+                    </span>
+                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+          </div>
+
+          <section className="meeting-transcript-flow" aria-label="Development team transcript">
+            {devRunning ? (
+              <article className="meeting-turn pending">
+                <div className="pending-line">
+                  <span className="speaker-lamp live" aria-hidden="true" />
+                  <Loader2 size={16} />
+                  <span>Ontwikkelteam maakt het traject klaar</span>
+                </div>
+              </article>
+            ) : null}
+            {rounds.map((round) => (
+              <article className={`meeting-turn ${isChairParticipant(round.participantId, round.participantName) ? "chair-turn" : ""}`} key={round.id}>
+                <header className="meeting-turn-header">
+                  <div className="meeting-speaker">
+                    <span className="speaker-lamp resting" aria-hidden="true" />
+                    <div className="message-meta">
+                      <span>{round.participantName}</span>
+                      <span>{formatMeetingPhase(round.phase)}</span>
+                    </div>
+                  </div>
+                </header>
+                <StructuredMeetingText text={round.content} />
+              </article>
+            ))}
+            {devResult?.slash_prompt ? (
+              <article className="meeting-summary development-command-card">
+                <div className="message-meta">
+                  <span>{devResult.agent_command || "/codex"}</span>
+                  <span>{devResult.execution || "approval-gated"}</span>
+                </div>
+                <pre>{devResult.slash_prompt}</pre>
+              </article>
+            ) : null}
+            {devTeamBuild.status !== "idle" ? (
+              <article className="meeting-summary dev-team-build-card">
+                <header className="dev-build-card-header">
+                  <strong>Aider-modus build</strong>
+                  <span className={`dev-build-status dev-build-status-${devTeamBuild.status}`}>
+                    {devTeamBuild.status === "running" && (
+                      <>
+                        <Loader2 size={13} /> bezig met iteratie {devTeamBuild.order[devTeamBuild.order.length - 1] || "?"}
+                      </>
+                    )}
+                    {devTeamBuild.status === "complete" && <>✓ tests groen</>}
+                    {devTeamBuild.status === "exhausted" && <>✗ iteraties uitgeput</>}
+                    {devTeamBuild.status === "error" && <>✗ fout</>}
+                  </span>
+                </header>
+                {devTeamBuild.workspace_path ? (
+                  <small className="dev-build-workspace">workspace: <code>{devTeamBuild.workspace_path}</code></small>
+                ) : null}
+                {devTeamBuild.order.map((iterNum) => {
+                  const it = devTeamBuild.iterations[iterNum];
+                  if (!it) return null;
+                  const isGreen = it.green === true;
+                  const isRed = it.exit_code !== undefined && it.exit_code !== 0;
+                  return (
+                    <section className={`dev-build-iter ${isGreen ? "iter-green" : isRed ? "iter-red" : ""}`} key={iterNum}>
+                      <header className="dev-build-iter-header">
+                        <strong>Iteratie {iterNum}</strong>
+                        {it.exit_code !== undefined ? (
+                          <span className={`iter-badge ${isGreen ? "badge-green" : "badge-red"}`}>
+                            exit {it.exit_code}{it.timed_out ? " (timeout)" : ""}
+                          </span>
+                        ) : null}
+                        {it.duration_s !== undefined ? <small>{it.duration_s.toFixed(2)}s</small> : null}
+                      </header>
+                      {it.developer ? (
+                        <div className="dev-build-role">
+                          <em>De Developper</em>
+                          <p>{it.developer}</p>
+                        </div>
+                      ) : null}
+                      {it.files && it.files.length ? (
+                        <div className="dev-build-files">
+                          {it.files.map((f) => (
+                            <span className="dev-build-file-chip" key={f.path} title={f.truncated ? "truncated" : `${f.bytes_written} bytes`}>
+                              <code>{f.path}</code>
+                              <small>{f.bytes_written}B{f.truncated ? " ⚠" : ""}</small>
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {it.tester ? (
+                        <div className="dev-build-role">
+                          <em>De Tester</em>
+                          <p>{it.tester}</p>
+                        </div>
+                      ) : null}
+                      {it.command ? (
+                        <pre className="dev-build-cmd">$ {it.command}</pre>
+                      ) : null}
+                      {it.stdout || it.stderr ? (
+                        <details className="dev-build-output">
+                          <summary>test-output ({(it.stdout?.length || 0) + (it.stderr?.length || 0)} chars)</summary>
+                          {it.stdout ? <pre className="dev-build-stdout">{it.stdout}</pre> : null}
+                          {it.stderr ? <pre className="dev-build-stderr">{it.stderr}</pre> : null}
+                        </details>
+                      ) : null}
+                      {it.critic ? (
+                        <div className="dev-build-role critic">
+                          <em>Criticus</em>
+                          <p>{it.critic}</p>
+                        </div>
+                      ) : null}
+                      {it.chair_verdict ? (
+                        <div className={`dev-build-role chair-${it.chair_verdict.toLowerCase()}`}>
+                          <em>Voorzitter — {it.chair_verdict === "DONE" ? "build af" : "ga door"}</em>
+                          {it.chair_reason ? <p>{it.chair_reason}</p> : null}
+                          {it.chair_next ? <p className="dev-build-next-subtask"><strong>Volgende stap:</strong> {it.chair_next}</p> : null}
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
+                {devTeamBuild.finalMessage ? (
+                  <div className={`dev-build-final dev-build-final-${devTeamBuild.status}`}>{devTeamBuild.finalMessage}</div>
+                ) : null}
+                {devTeamBuild.error ? (
+                  <div className="dev-build-final dev-build-final-error">{devTeamBuild.error}</div>
+                ) : null}
+              </article>
+            ) : null}
+
+            {devLaunchResult ? (
+              <article className="meeting-summary development-command-card">
+                <div className="message-meta">
+                  <span>Build gestart</span>
+                  <span>{String(devLaunchResult.route || devLaunchResult.status || "cockpit")}</span>
+                </div>
+                <StructuredMeetingText text={String(devLaunchResult.response || devLaunchResult.message || devLaunchResult.reason || "De approval-gated Cockpit workflow is gestart.")} />
+              </article>
+            ) : null}
+            {devLaunchError ? (
+              <article className="meeting-turn error">
+                <div className="message-meta">
+                  <span>Build start</span>
+                </div>
+                <p>{devLaunchError}</p>
+              </article>
+            ) : null}
+            {devError ? (
+              <article className="meeting-turn error">
+                <div className="message-meta">
+                  <span>Error</span>
+                </div>
+                <p>{devError}</p>
+              </article>
+            ) : null}
+          </section>
+        </div>
+      </section>
+    );
   }
 
   return (
@@ -1692,6 +3868,15 @@ function App() {
             onClick={() => activateRail("meeting")}
           >
             <Users size={22} />
+          </button>
+          <button
+            className={`rail-button ${viewMode === "development_team" ? "active" : ""}`}
+            type="button"
+            aria-label="Development team"
+            title="Development team"
+            onClick={() => activateRail("development_team")}
+          >
+            <Code2 size={22} />
           </button>
           <button
             className={`rail-button ${viewMode === "persona_builder" ? "active" : ""}`}
@@ -1808,7 +3993,13 @@ function App() {
         </div>
       </aside>
 
-      <main className="chat-main">
+      <main className={`chat-main ${viewMode === "meeting" || viewMode === "development_team" ? "meeting-main" : ""}`}>
+        {viewMode === "meeting" ? (
+          renderMeetingWorkspace()
+        ) : viewMode === "development_team" ? (
+          renderDevelopmentTeamWorkspace()
+        ) : (
+          <>
         <header className="chat-header">
           <div className="chat-title-group">
             <span className="eyebrow">Ouroboros Chat</span>
@@ -1820,28 +4011,34 @@ function App() {
               <select
                 value={currentProvider}
                 onChange={(event) => {
+                  const option = modelOptions.find((item) => item.id === event.target.value);
+                  const nextModel = option?.default_model || option?.models[0] || currentModel;
                   setProvider(event.target.value);
-                  updateCurrentThreadSettings({ provider: event.target.value });
+                  setModel(nextModel);
+                  updateCurrentThreadSettings({ provider: event.target.value, modelName: nextModel });
                 }}
               >
-                <option value="ollama">ollama</option>
-                <option value="ouroboros">ouroboros</option>
-                <option value="roo">roo</option>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-                <option value="google">google</option>
+                {modelOptions.map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {providerOptionLabel(option)}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="compact-field model-field">
               <span>Model</span>
-              <input
+              <select
                 ref={modelInputRef}
                 value={currentModel}
                 onChange={(event) => {
                   setModel(event.target.value);
                   updateCurrentThreadSettings({ modelName: event.target.value });
                 }}
-              />
+              >
+                {currentModelChoices.map((item) => (
+                  <option value={item} key={item}>{item}</option>
+                ))}
+              </select>
             </label>
           </div>
         </header>
@@ -1992,6 +4189,8 @@ function App() {
             </div>
           </div>
         </section>
+          </>
+        )}
       </main>
 
       <aside className="inspector" aria-label="Persona and meeting panels">
@@ -2057,7 +4256,7 @@ function App() {
           </label>
           <label className="field">
             <span>Model</span>
-            <input
+            <select
               value={draftPersona.modelSettings.name}
               onChange={(event) =>
                 setDraftPersona({
@@ -2066,20 +4265,32 @@ function App() {
                   modelSettings: { ...draftPersona.modelSettings, name: event.target.value },
                 })
               }
-            />
+            >
+              {draftModelChoices.map((item) => (
+                <option value={item} key={item}>{item}</option>
+              ))}
+            </select>
           </label>
           <div className="two-col-fields">
             <label className="field">
               <span>Provider</span>
               <select
                 value={draftPersona.modelSettings.provider}
-                onChange={(event) => setDraftPersona({ ...draftPersona, modelSettings: { ...draftPersona.modelSettings, provider: event.target.value } })}
+                onChange={(event) => {
+                  const option = modelOptions.find((item) => item.id === event.target.value);
+                  const nextModel = option?.default_model || option?.models[0] || draftPersona.modelSettings.name;
+                  setDraftPersona({
+                    ...draftPersona,
+                    model: nextModel,
+                    modelSettings: { ...draftPersona.modelSettings, provider: event.target.value, name: nextModel },
+                  });
+                }}
               >
-                <option value="ollama">ollama</option>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-                <option value="google">google</option>
-                <option value="local">local</option>
+                {modelOptions.map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {providerOptionLabel(option)}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="field">
@@ -2183,6 +4394,16 @@ function App() {
                 onChange={(event) => void uploadPersonaKnowledge(event.target.files)}
               />
             </div>
+            <div className="knowledge-link-row">
+              <input
+                value={knowledgeLinkDraft}
+                onChange={(event) => setKnowledgeLinkDraft(event.target.value)}
+                placeholder="https://bron.example/artikel"
+              />
+              <button type="button" onClick={addPersonaKnowledgeLink} disabled={!knowledgeLinkDraft.trim()}>
+                <Plus size={14} />
+              </button>
+            </div>
             <div className="knowledge-list">
               {draftPersona.knowledgeFiles.length ? (
                 draftPersona.knowledgeFiles.map((file) => (
@@ -2197,7 +4418,19 @@ function App() {
               ) : (
                 <span className="empty-note">Geen kennisbestanden</span>
               )}
+              {draftPersona.knowledgeSources.map((source) => (
+                <div className="knowledge-file" key={source.url}>
+                  <Globe2 size={15} />
+                  <span>{source.label || source.url}</span>
+                  <button type="button" onClick={() => removePersonaKnowledgeLink(source.url)} aria-label={`Remove ${source.label || source.url}`}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
             </div>
+            <span className="empty-note">
+              Web search: {draftPersona.tools.web_search ? braveConfigured ? "Brave actief" : "Brave key ontbreekt in Cockpit" : "uit voor deze persona"}
+            </span>
           </div>
           <button className="meeting-action" type="button" onClick={() => void savePersona()} disabled={personaSaving}>
             {personaSaving ? <Loader2 size={17} /> : <Check size={17} />}
@@ -2208,9 +4441,18 @@ function App() {
               Save as new
             </button>
             <button type="button" onClick={() => void useDraftInChat()} disabled={!draftPersona.id}>
-              Use in chat
+              Use in new chat
             </button>
-            <button type="button" onClick={() => { if (draftPersona.id) { seatPersonaAtMeeting(personasById[draftPersona.id] || draftPersona); } }} disabled={!draftPersona.id}>
+            <button
+              type="button"
+              onClick={() => {
+                const record = draftPersona.id ? personasById[draftPersona.id] : undefined;
+                if (record) {
+                  seatPersonaAtMeeting(record);
+                }
+              }}
+              disabled={!draftPersona.id || !personasById[draftPersona.id]}
+            >
               Add to meeting
             </button>
             <button type="button" onClick={() => void duplicatePersona()} disabled={!draftPersona.id}>
@@ -2263,7 +4505,7 @@ function App() {
           </div>
           <label className="field">
             <span>Topic</span>
-            <textarea ref={meetingTopicRef} value={meetingTopic} onChange={(event) => setMeetingTopic(event.target.value)} rows={3} />
+            <textarea ref={meetingTopicRef} value={meetingTopic} onChange={(event) => updateMeetingTopic(event.target.value)} rows={3} />
           </label>
           <div className="member-list">
             <div className="member-section-label">
@@ -2325,6 +4567,10 @@ function App() {
               <Sparkles size={17} />
               <span>Agent task</span>
             </button>
+            <button className="meeting-action secondary" type="button" onClick={() => continueMeetingInDevelopmentTeam(true)} disabled={!activeMeeting?.summary || devRunning}>
+              {devRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+              <span>Dev workflow</span>
+            </button>
           </div>
           {activeMeetingId && meetingsById[activeMeetingId]?.transcript ? (
             <div className="meeting-transcript">
@@ -2353,6 +4599,10 @@ function App() {
           <div className="metric-row">
             <span>Files</span>
             <strong>{readyFilePaths.length}</strong>
+          </div>
+          <div className="metric-row">
+            <span>ChatGPT-Codex</span>
+            <strong>{chatgptCodexOption?.configured ? "linked" : "not linked"}</strong>
           </div>
           <div className="metric-row">
             <span>Table</span>

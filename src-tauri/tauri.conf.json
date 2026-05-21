@@ -42,6 +42,14 @@
       "icons/icon.png"
     ],
     "shortDescription": "Standalone Ouroboros Chat",
-    "longDescription": "A local desktop chat shell for the WintripAI Ouroboros backend."
+    "longDescription": "A local desktop chat shell for the WintripAI Ouroboros backend.",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "depends": []
+      }
+    }
   }
 }
