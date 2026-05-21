@@ -3146,6 +3146,7 @@ function App() {
         </header>
 
         <div className="meeting-workspace-body">
+          <div className="meeting-config-stack">
           <section className="meeting-setup-band development-setup-band">
             <label className="field meeting-topic-field">
               <span>Prompt</span>
@@ -3299,6 +3300,7 @@ function App() {
               </div>
             </div>
           </section>
+          </div>
 
           <section className="meeting-transcript-flow" aria-label="Development team transcript">
             {devRunning ? (
