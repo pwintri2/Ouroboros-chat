@@ -251,7 +251,23 @@ type DevelopmentTeamResult = {
   slash_prompt?: string;
   safety_note?: string;
   rounds?: DevelopmentTeamRound[];
+  build_prompt?: string;
+  summary?: string;
+  meeting_id?: string;
+  meeting_type?: string;
+  augmented_prompt?: string;
 };
+
+type DevelopmentTeamIntakeResult = {
+  status: string;
+  needs_clarification: boolean;
+  questions: string[];
+  prompt: string;
+  provider?: string;
+  model?: string;
+};
+
+type ClarificationAnswer = { question: string; answer: string };
 
 type MeetingMember = {
   id: string;
@@ -1250,6 +1266,10 @@ function App() {
   const [devResult, setDevResult] = useState<DevelopmentTeamResult | null>(null);
   const [devError, setDevError] = useState("");
   const [devApproval, setDevApproval] = useState("");
+  const [devClarificationQuestions, setDevClarificationQuestions] = useState<string[]>([]);
+  const [devClarificationAnswers, setDevClarificationAnswers] = useState<Record<string, string>>({});
+  const [devIntakeRunning, setDevIntakeRunning] = useState(false);
+  const [devEditableBuildPrompt, setDevEditableBuildPrompt] = useState("");
   const [devLaunchRunning, setDevLaunchRunning] = useState(false);
   const [devLaunchResult, setDevLaunchResult] = useState<Record<string, unknown> | null>(null);
   const [devLaunchError, setDevLaunchError] = useState("");
@@ -2646,19 +2666,79 @@ function App() {
     setDevModel(option?.default_model || option?.models[0] || devModel || DEFAULT_MODEL);
   }
 
+  const DEV_TEAM_DEFAULT_PERSONA_IDS = ["de-voorzitter", "de-developer", "de-tester", "de-criticus"];
+
+  function resolveDevPersonaIds(personaOverride?: string[]): string[] {
+    const explicit = personaOverride?.length
+      ? personaOverride
+      : selectedPersonaMembers.map((member) => member.id).filter(Boolean);
+    if (explicit.length) {
+      return personasById["de-voorzitter"] && !explicit.includes("de-voorzitter")
+        ? ["de-voorzitter", ...explicit]
+        : explicit;
+    }
+    // No explicit selection — default to the four dev-team personas so the user can hit
+    // "Start team" without picking anyone first.
+    return DEV_TEAM_DEFAULT_PERSONA_IDS.filter((id) => Boolean(personasById[id]));
+  }
+
   async function startDevelopmentTeam(promptOverride?: string, personaOverride?: string[], agentOverride?: string[]) {
     const promptText = promptOverride?.trim() || devPrompt.trim() || meetingTopic.trim() || "Maak een robuuste implementatie en draai tests.";
-    const selectedParticipants = personaOverride?.length ? personaOverride : selectedPersonaMembers.map((member) => member.id);
-    const personaIds =
-      personasById["de-voorzitter"] && !selectedParticipants.includes("de-voorzitter")
-        ? ["de-voorzitter", ...selectedParticipants]
-        : selectedParticipants;
     const agentIds = agentOverride?.length ? agentOverride : selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
-    setDevRunning(true);
     setDevError("");
     setDevLaunchError("");
     setDevLaunchResult(null);
+    setDevClarificationAnswers({});
+    setDevClarificationQuestions([]);
+    setDevResult(null);
+    setDevEditableBuildPrompt("");
     setViewMode("development_team");
+
+    // Step 1 — Intake: chair LLM decides whether the prompt needs clarification before the
+    // four-persona meeting kicks off.
+    setDevIntakeRunning(true);
+    let intake: DevelopmentTeamIntakeResult | null = null;
+    try {
+      intake = await fetchJson<DevelopmentTeamIntakeResult>("/api/ouroboros-chat/development-team/intake", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptText,
+          provider: devProvider,
+          model: devModel,
+        }),
+      });
+    } catch (error) {
+      setDevIntakeRunning(false);
+      setDevError(`Intake mislukt: ${friendlyErrorMessage(error)}`);
+      return;
+    }
+    setDevIntakeRunning(false);
+
+    if (intake?.needs_clarification && intake.questions?.length) {
+      // Show the clarification form. The user fills the answers, clicks "Beantwoord en start
+      // overleg" which calls `runDevelopmentTeamMeeting` with the Q&A bundle.
+      setDevClarificationQuestions(intake.questions);
+      const seeded: Record<string, string> = {};
+      intake.questions.forEach((q) => {
+        seeded[q] = "";
+      });
+      setDevClarificationAnswers(seeded);
+      return;
+    }
+
+    // No clarification needed — go straight to the four-persona meeting.
+    await runDevelopmentTeamMeeting(promptText, resolveDevPersonaIds(personaOverride), agentIds, []);
+  }
+
+  async function runDevelopmentTeamMeeting(
+    promptText: string,
+    personaIds: string[],
+    agentIds: string[],
+    clarifications: ClarificationAnswer[]
+  ) {
+    setDevRunning(true);
+    setDevError("");
     try {
       const payload = await fetchJson<DevelopmentTeamResult>("/api/ouroboros-chat/development-team", {
         method: "POST",
@@ -2670,15 +2750,42 @@ function App() {
           provider: devProvider,
           model: devModel,
           max_iterations: devMaxIterations,
+          clarifications,
         }),
       });
       setDevResult(payload);
+      setDevEditableBuildPrompt(payload?.build_prompt || "");
     } catch (error) {
       setDevResult(null);
       setDevError(friendlyErrorMessage(error));
     } finally {
       setDevRunning(false);
     }
+  }
+
+  async function submitDevTeamClarifications() {
+    if (!devClarificationQuestions.length) return;
+    const pairs: ClarificationAnswer[] = devClarificationQuestions.map((question) => ({
+      question,
+      answer: (devClarificationAnswers[question] || "").trim(),
+    }));
+    const promptText = devPrompt.trim() || "Maak een robuuste implementatie en draai tests.";
+    const personaIds = resolveDevPersonaIds();
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    // Clear the form so the UI moves on to the running-meeting state.
+    setDevClarificationQuestions([]);
+    setDevClarificationAnswers({});
+    await runDevelopmentTeamMeeting(promptText, personaIds, agentIds, pairs);
+  }
+
+  function skipDevTeamClarifications() {
+    if (!devClarificationQuestions.length) return;
+    const promptText = devPrompt.trim() || "Maak een robuuste implementatie en draai tests.";
+    const personaIds = resolveDevPersonaIds();
+    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
+    setDevClarificationQuestions([]);
+    setDevClarificationAnswers({});
+    void runDevelopmentTeamMeeting(promptText, personaIds, agentIds, []);
   }
 
   function continueMeetingInDevelopmentTeam(autoPlan = false) {
@@ -2720,12 +2827,23 @@ function App() {
     setDevLaunchRunning(true);
     setDevLaunchError("");
     setDevLaunchResult(null);
+    // If the user edited the build_prompt textarea, splice that text in instead of the
+    // build_prompt the meeting produced. The slash-command prefix and protocol block stay.
+    const command = devResult.agent_command || "/codex";
+    const edited = (devEditableBuildPrompt || "").trim();
+    const original = (devResult.build_prompt || "").trim();
+    let finalSlashPrompt = devResult.slash_prompt;
+    if (edited && edited !== original) {
+      const parts = devResult.slash_prompt.split("\n\n---\n", 2);
+      const protocol = parts.length > 1 ? `\n\n---\n${parts[1]}` : "";
+      finalSlashPrompt = `${command} ${edited}${protocol}`;
+    }
     try {
       const payload = await fetchJson<Record<string, unknown>>("/api/cockpit/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: devResult.slash_prompt,
+          prompt: finalSlashPrompt,
           approval: "Akkoord",
           provider: devProvider,
           model: devModel,
@@ -3189,15 +3307,87 @@ function App() {
               </label>
             </div>
             <div className="meeting-command-row">
-              <button className="meeting-action" type="button" onClick={() => void startDevelopmentTeam()} disabled={devRunning}>
-                {devRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
-                <span>Start team</span>
+              <button
+                className="meeting-action"
+                type="button"
+                onClick={() => void startDevelopmentTeam()}
+                disabled={devRunning || devIntakeRunning || devClarificationQuestions.length > 0}
+              >
+                {devRunning || devIntakeRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                <span>
+                  {devIntakeRunning
+                    ? "Voorzitter denkt na..."
+                    : devRunning
+                      ? "Team overlegt..."
+                      : "Start team"}
+                </span>
               </button>
               <button className="meeting-action secondary" type="button" onClick={insertDevelopmentPrompt} disabled={!devResult?.slash_prompt}>
                 <Sparkles size={17} />
                 <span>Create agent task</span>
               </button>
             </div>
+
+            {devClarificationQuestions.length > 0 ? (
+              <div className="dev-clarification-card" role="dialog" aria-label="Verduidelijkingsvragen van de voorzitter">
+                <div className="dev-clarification-header">
+                  <strong>De voorzitter heeft eerst een paar vragen</strong>
+                  <small>Beantwoord wat je weet — wat je open laat mag het team zelf invullen.</small>
+                </div>
+                {devClarificationQuestions.map((question, index) => (
+                  <label className="dev-clarification-row" key={`${question}-${index}`}>
+                    <span>{question}</span>
+                    <textarea
+                      value={devClarificationAnswers[question] || ""}
+                      onChange={(event) =>
+                        setDevClarificationAnswers((previous) => ({
+                          ...previous,
+                          [question]: event.target.value,
+                        }))
+                      }
+                      rows={2}
+                      placeholder="Jouw antwoord..."
+                    />
+                  </label>
+                ))}
+                <div className="dev-clarification-actions">
+                  <button
+                    className="meeting-action"
+                    type="button"
+                    onClick={() => void submitDevTeamClarifications()}
+                    disabled={devRunning}
+                  >
+                    {devRunning ? <Loader2 size={17} /> : <Sparkles size={17} />}
+                    <span>Beantwoord en start overleg</span>
+                  </button>
+                  <button
+                    className="meeting-action secondary"
+                    type="button"
+                    onClick={() => skipDevTeamClarifications()}
+                    disabled={devRunning}
+                  >
+                    <Code2 size={17} />
+                    <span>Sla over, team mag aannames maken</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {devResult?.build_prompt ? (
+              <div className="dev-build-prompt-card">
+                <div className="dev-build-prompt-header">
+                  <strong>Bouwprompt voor de uitvoerende agent</strong>
+                  <small>Pas aan als je iets wil verfijnen voordat je {devResult.agent_command || "/codex"} laat lopen.</small>
+                </div>
+                <textarea
+                  className="dev-build-prompt-textarea"
+                  value={devEditableBuildPrompt}
+                  onChange={(event) => setDevEditableBuildPrompt(event.target.value)}
+                  rows={Math.min(12, Math.max(4, devEditableBuildPrompt.split("\n").length + 1))}
+                />
+              </div>
+            ) : null}
+
             {devResult?.slash_prompt ? (
               <div className="approval-run-card">
                 <label className="compact-field">
