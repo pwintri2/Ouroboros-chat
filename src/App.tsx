@@ -269,6 +269,35 @@ type DevelopmentTeamIntakeResult = {
 
 type ClarificationAnswer = { question: string; answer: string };
 
+type BuildFileWrite = { path: string; bytes_written: number; truncated?: boolean };
+
+type BuildIteration = {
+  iteration: number;
+  developer?: string;
+  tester?: string;
+  critic?: string;
+  files?: BuildFileWrite[];
+  command?: string;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  duration_s?: number;
+  green?: boolean;
+  timed_out?: boolean;
+};
+
+type BuildSessionState = {
+  session_id?: string;
+  workspace_path?: string;
+  max_iterations?: number;
+  iterations: Record<number, BuildIteration>;
+  order: number[];
+  status: "running" | "complete" | "exhausted" | "error" | "idle";
+  finalMessage?: string;
+  error?: string;
+  startedAt?: string;
+};
+
 type MeetingMember = {
   id: string;
   name: string;
@@ -1270,6 +1299,13 @@ function App() {
   const [devClarificationAnswers, setDevClarificationAnswers] = useState<Record<string, string>>({});
   const [devIntakeRunning, setDevIntakeRunning] = useState(false);
   const [devEditableBuildPrompt, setDevEditableBuildPrompt] = useState("");
+  const [devTeamBuildRunning, setDevTeamBuildRunning] = useState(false);
+  const [devTeamBuild, setDevTeamBuild] = useState<BuildSessionState>({
+    iterations: {},
+    order: [],
+    status: "idle",
+  });
+  const [devTeamBuildError, setDevTeamBuildError] = useState("");
   const [devLaunchRunning, setDevLaunchRunning] = useState(false);
   const [devLaunchResult, setDevLaunchResult] = useState<Record<string, unknown> | null>(null);
   const [devLaunchError, setDevLaunchError] = useState("");
@@ -2824,6 +2860,132 @@ function App() {
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
+  async function startTeamBuild() {
+    // Reset prior build state and open the SSE stream against the new /development-team/build route.
+    const buildPrompt = (devEditableBuildPrompt || devResult?.build_prompt || "").trim();
+    if (!buildPrompt || devTeamBuildRunning) return;
+    setDevTeamBuildRunning(true);
+    setDevTeamBuildError("");
+    setDevTeamBuild({
+      iterations: {},
+      order: [],
+      status: "running",
+      startedAt: nowIso(),
+    });
+    const personaIds = resolveDevPersonaIds();
+    let response: Response;
+    try {
+      response = await fetch(apiUrl("/api/ouroboros-chat/development-team/build"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({
+          build_prompt: buildPrompt,
+          persona_ids: personaIds,
+          clarifications: [],
+          provider: devProvider,
+          model: devModel,
+          max_iterations: Math.max(1, Math.min(6, devMaxIterations || 4)),
+          test_timeout_seconds: 120,
+        }),
+      });
+    } catch (error) {
+      setDevTeamBuildRunning(false);
+      setDevTeamBuildError(friendlyErrorMessage(error));
+      setDevTeamBuild((prev) => ({ ...prev, status: "error", error: friendlyErrorMessage(error) }));
+      return;
+    }
+    if (!response.ok || !response.body) {
+      const detail = response.status === 404
+        ? "De build-route ontbreekt — herbouw de backend (commit fe514ab of nieuwer)."
+        : `Build start mislukt: HTTP ${response.status}`;
+      setDevTeamBuildRunning(false);
+      setDevTeamBuildError(detail);
+      setDevTeamBuild((prev) => ({ ...prev, status: "error", error: detail }));
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    const applyEvent = (payload: Record<string, unknown>) => {
+      const type = String(payload.type || "");
+      setDevTeamBuild((previous) => {
+        const next: BuildSessionState = {
+          ...previous,
+          iterations: { ...previous.iterations },
+          order: [...previous.order],
+        };
+        if (type === "build_started") {
+          next.session_id = String(payload.session_id || "");
+          next.workspace_path = String(payload.workspace_path || "");
+          next.max_iterations = Number(payload.max_iterations || 0) || undefined;
+          next.status = "running";
+          return next;
+        }
+        const iterationNum = Number(payload.iteration);
+        if (Number.isFinite(iterationNum) && iterationNum > 0) {
+          const existing = next.iterations[iterationNum] || { iteration: iterationNum };
+          if (type === "developer_turn") existing.developer = String(payload.content || "");
+          if (type === "files_written") existing.files = (payload.files as BuildFileWrite[]) || [];
+          if (type === "tester_turn") existing.tester = String(payload.content || "");
+          if (type === "test_run") {
+            existing.command = String(payload.command || "");
+            existing.exit_code = Number(payload.exit_code);
+            existing.stdout = String(payload.stdout || "");
+            existing.stderr = String(payload.stderr || "");
+            existing.duration_s = Number(payload.duration_s);
+            existing.green = Boolean(payload.green);
+            existing.timed_out = Boolean(payload.timed_out);
+          }
+          if (type === "critic_turn") existing.critic = String(payload.content || "");
+          next.iterations[iterationNum] = existing;
+          if (!next.order.includes(iterationNum)) next.order.push(iterationNum);
+        }
+        if (type === "build_complete") {
+          next.status = "complete";
+          next.finalMessage = `Build groen na ${payload.iterations || "?"} iteratie(s).`;
+        }
+        if (type === "build_exhausted") {
+          next.status = "exhausted";
+          next.finalMessage = `Build niet groen na ${payload.iterations || "?"} iteratie(s); zie laatste test-output.`;
+        }
+        if (type === "build_error") {
+          next.status = "error";
+          next.error = String(payload.error || "Onbekende fout.");
+        }
+        return next;
+      });
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          let dataPayload = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) {
+              dataPayload += line.slice(5).trimStart();
+            }
+          }
+          if (!dataPayload) continue;
+          try {
+            applyEvent(JSON.parse(dataPayload));
+          } catch (parseError) {
+            console.warn("Failed to parse build SSE frame", parseError);
+          }
+        }
+      }
+    } finally {
+      setDevTeamBuildRunning(false);
+    }
+  }
+
   async function approveAndStartDevelopmentBuild() {
     if (!devResult?.slash_prompt || devApproval.trim() !== "Akkoord" || devLaunchRunning) return;
     setDevLaunchRunning(true);
@@ -3379,7 +3541,7 @@ function App() {
               <div className="dev-build-prompt-card">
                 <div className="dev-build-prompt-header">
                   <strong>Bouwprompt voor de uitvoerende agent</strong>
-                  <small>Pas aan als je iets wil verfijnen voordat je {devResult.agent_command || "/codex"} laat lopen.</small>
+                  <small>Pas aan als je iets wil verfijnen voordat het team gaat bouwen of voordat je {devResult.agent_command || "/codex"} laat lopen.</small>
                 </div>
                 <textarea
                   className="dev-build-prompt-textarea"
@@ -3387,6 +3549,28 @@ function App() {
                   onChange={(event) => setDevEditableBuildPrompt(event.target.value)}
                   rows={Math.min(12, Math.max(4, devEditableBuildPrompt.split("\n").length + 1))}
                 />
+                <div className="dev-build-prompt-actions">
+                  <button
+                    className="meeting-action"
+                    type="button"
+                    onClick={() => void startTeamBuild()}
+                    disabled={devTeamBuildRunning || !(devEditableBuildPrompt || devResult.build_prompt)}
+                  >
+                    {devTeamBuildRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
+                    <span>{devTeamBuildRunning ? "Team bouwt..." : "Bouw uit met team (Aider-modus)"}</span>
+                  </button>
+                  <small className="dev-build-prompt-hint">
+                    Het team schrijft files in een sandbox onder <code>data/dev-team-builds/</code>, draait de testcommando's
+                    daar, en itereert tot de test groen is of {devMaxIterations} pogingen voorbij zijn.
+                  </small>
+                </div>
+              </div>
+            ) : null}
+
+            {devTeamBuildError ? (
+              <div className="dev-build-error">
+                <strong>Build kon niet starten</strong>
+                <small>{devTeamBuildError}</small>
               </div>
             ) : null}
 
@@ -3527,6 +3711,90 @@ function App() {
                 <pre>{devResult.slash_prompt}</pre>
               </article>
             ) : null}
+            {devTeamBuild.status !== "idle" ? (
+              <article className="meeting-summary dev-team-build-card">
+                <header className="dev-build-card-header">
+                  <strong>Aider-modus build</strong>
+                  <span className={`dev-build-status dev-build-status-${devTeamBuild.status}`}>
+                    {devTeamBuild.status === "running" && (
+                      <>
+                        <Loader2 size={13} /> bezig met iteratie {devTeamBuild.order[devTeamBuild.order.length - 1] || "?"}
+                      </>
+                    )}
+                    {devTeamBuild.status === "complete" && <>✓ tests groen</>}
+                    {devTeamBuild.status === "exhausted" && <>✗ iteraties uitgeput</>}
+                    {devTeamBuild.status === "error" && <>✗ fout</>}
+                  </span>
+                </header>
+                {devTeamBuild.workspace_path ? (
+                  <small className="dev-build-workspace">workspace: <code>{devTeamBuild.workspace_path}</code></small>
+                ) : null}
+                {devTeamBuild.order.map((iterNum) => {
+                  const it = devTeamBuild.iterations[iterNum];
+                  if (!it) return null;
+                  const isGreen = it.green === true;
+                  const isRed = it.exit_code !== undefined && it.exit_code !== 0;
+                  return (
+                    <section className={`dev-build-iter ${isGreen ? "iter-green" : isRed ? "iter-red" : ""}`} key={iterNum}>
+                      <header className="dev-build-iter-header">
+                        <strong>Iteratie {iterNum}</strong>
+                        {it.exit_code !== undefined ? (
+                          <span className={`iter-badge ${isGreen ? "badge-green" : "badge-red"}`}>
+                            exit {it.exit_code}{it.timed_out ? " (timeout)" : ""}
+                          </span>
+                        ) : null}
+                        {it.duration_s !== undefined ? <small>{it.duration_s.toFixed(2)}s</small> : null}
+                      </header>
+                      {it.developer ? (
+                        <div className="dev-build-role">
+                          <em>De Developper</em>
+                          <p>{it.developer}</p>
+                        </div>
+                      ) : null}
+                      {it.files && it.files.length ? (
+                        <div className="dev-build-files">
+                          {it.files.map((f) => (
+                            <span className="dev-build-file-chip" key={f.path} title={f.truncated ? "truncated" : `${f.bytes_written} bytes`}>
+                              <code>{f.path}</code>
+                              <small>{f.bytes_written}B{f.truncated ? " ⚠" : ""}</small>
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {it.tester ? (
+                        <div className="dev-build-role">
+                          <em>De Tester</em>
+                          <p>{it.tester}</p>
+                        </div>
+                      ) : null}
+                      {it.command ? (
+                        <pre className="dev-build-cmd">$ {it.command}</pre>
+                      ) : null}
+                      {it.stdout || it.stderr ? (
+                        <details className="dev-build-output">
+                          <summary>test-output ({(it.stdout?.length || 0) + (it.stderr?.length || 0)} chars)</summary>
+                          {it.stdout ? <pre className="dev-build-stdout">{it.stdout}</pre> : null}
+                          {it.stderr ? <pre className="dev-build-stderr">{it.stderr}</pre> : null}
+                        </details>
+                      ) : null}
+                      {it.critic ? (
+                        <div className="dev-build-role critic">
+                          <em>Criticus</em>
+                          <p>{it.critic}</p>
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
+                {devTeamBuild.finalMessage ? (
+                  <div className={`dev-build-final dev-build-final-${devTeamBuild.status}`}>{devTeamBuild.finalMessage}</div>
+                ) : null}
+                {devTeamBuild.error ? (
+                  <div className="dev-build-final dev-build-final-error">{devTeamBuild.error}</div>
+                ) : null}
+              </article>
+            ) : null}
+
             {devLaunchResult ? (
               <article className="meeting-summary development-command-card">
                 <div className="message-meta">

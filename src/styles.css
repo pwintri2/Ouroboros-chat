@@ -1087,6 +1087,258 @@ p {
   box-shadow: 0 0 0 1px rgba(123, 220, 195, 0.28);
 }
 
+.dev-build-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.dev-build-prompt-hint {
+  flex: 1 1 280px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.dev-build-prompt-hint code {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.dev-build-error {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 113, 133, 0.5);
+  border-radius: 10px;
+  background: rgba(251, 113, 133, 0.06);
+}
+
+.dev-team-build-card {
+  display: grid;
+  gap: 12px;
+  border-color: rgba(123, 220, 195, 0.42);
+}
+
+.dev-build-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dev-build-card-header strong {
+  font-size: 13px;
+  color: var(--accent-2, #7bdcc3);
+}
+
+.dev-build-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.dev-build-status-running {
+  background: rgba(242, 201, 125, 0.16);
+  color: var(--accent, #f2c97d);
+}
+.dev-build-status-complete {
+  background: rgba(123, 220, 195, 0.18);
+  color: var(--accent-2, #7bdcc3);
+}
+.dev-build-status-exhausted,
+.dev-build-status-error {
+  background: rgba(251, 113, 133, 0.18);
+  color: #fb7185;
+}
+
+.dev-build-workspace {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dev-build-workspace code {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.dev-build-iter {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.dev-build-iter.iter-green {
+  border-color: rgba(123, 220, 195, 0.4);
+  background: rgba(123, 220, 195, 0.07);
+}
+
+.dev-build-iter.iter-red {
+  border-color: rgba(251, 113, 133, 0.32);
+  background: rgba(251, 113, 133, 0.05);
+}
+
+.dev-build-iter-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.dev-build-iter-header strong {
+  font-size: 12.5px;
+  color: var(--text, #e6e9ee);
+}
+
+.iter-badge {
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.iter-badge.badge-green {
+  background: rgba(123, 220, 195, 0.18);
+  color: var(--accent-2, #7bdcc3);
+  border: 1px solid rgba(123, 220, 195, 0.4);
+}
+
+.iter-badge.badge-red {
+  background: rgba(251, 113, 133, 0.18);
+  color: #fb7185;
+  border: 1px solid rgba(251, 113, 133, 0.4);
+}
+
+.dev-build-role {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border-left: 2px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.dev-build-role em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dev-build-role.critic {
+  border-left-color: rgba(251, 113, 133, 0.42);
+}
+
+.dev-build-role p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text, #e6e9ee);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dev-build-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dev-build-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(242, 201, 125, 0.1);
+  border: 1px solid rgba(242, 201, 125, 0.32);
+  color: var(--text, #e6e9ee);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 11px;
+}
+
+.dev-build-file-chip small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.dev-build-cmd {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #0c1015;
+  border: 1px solid var(--line-soft);
+  color: var(--accent-2, #7bdcc3);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dev-build-output {
+  font-size: 11.5px;
+}
+
+.dev-build-output summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.dev-build-stdout,
+.dev-build-stderr {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #0c1015;
+  border: 1px solid var(--line-soft);
+  color: var(--text, #e6e9ee);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dev-build-stderr {
+  border-color: rgba(251, 113, 133, 0.32);
+  background: rgba(251, 113, 133, 0.04);
+}
+
+.dev-build-final {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.dev-build-final-complete {
+  background: rgba(123, 220, 195, 0.18);
+  color: var(--accent-2, #7bdcc3);
+}
+
+.dev-build-final-exhausted,
+.dev-build-final-error {
+  background: rgba(251, 113, 133, 0.16);
+  color: #fb7185;
+}
+
 .participant-chip strong,
 .participant-chip small {
   display: block;
