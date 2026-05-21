@@ -1292,7 +1292,10 @@ function App() {
   const [savedMeetings, setSavedMeetings] = useState<SavedMeetingRecord[]>([]);
   const [devPrompt, setDevPrompt] = useState("Maak een robuuste implementatie, overleg, test en stop bij herhaling.");
   const [devProvider, setDevProvider] = useState("ollama");
-  const [devModel, setDevModel] = useState("devstral:latest");
+  // Default to the lightweight local ouroboros model. A 23B "devstral" cold-start can take
+  // 30-60s, which makes the intake + meeting feel unresponsive. The user can opt up to a
+  // bigger model from the dropdown when they're prepared to wait for it.
+  const [devModel, setDevModel] = useState("ouroboros:latest");
   const [devMaxIterations, setDevMaxIterations] = useState(3);
   const [devRunning, setDevRunning] = useState(false);
   const [devResult, setDevResult] = useState<DevelopmentTeamResult | null>(null);
