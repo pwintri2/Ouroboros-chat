@@ -284,6 +284,9 @@ type BuildIteration = {
   duration_s?: number;
   green?: boolean;
   timed_out?: boolean;
+  chair_verdict?: string;
+  chair_reason?: string;
+  chair_next?: string;
 };
 
 type BuildSessionState = {
@@ -2939,6 +2942,11 @@ function App() {
             existing.timed_out = Boolean(payload.timed_out);
           }
           if (type === "critic_turn") existing.critic = String(payload.content || "");
+          if (type === "chair_review") {
+            existing.chair_verdict = String(payload.verdict || "");
+            existing.chair_reason = String(payload.reason || "");
+            existing.chair_next = String(payload.next_subtask || "");
+          }
           next.iterations[iterationNum] = existing;
           if (!next.order.includes(iterationNum)) next.order.push(iterationNum);
         }
@@ -3781,6 +3789,13 @@ function App() {
                         <div className="dev-build-role critic">
                           <em>Criticus</em>
                           <p>{it.critic}</p>
+                        </div>
+                      ) : null}
+                      {it.chair_verdict ? (
+                        <div className={`dev-build-role chair-${it.chair_verdict.toLowerCase()}`}>
+                          <em>Voorzitter — {it.chair_verdict === "DONE" ? "build af" : "ga door"}</em>
+                          {it.chair_reason ? <p>{it.chair_reason}</p> : null}
+                          {it.chair_next ? <p className="dev-build-next-subtask"><strong>Volgende stap:</strong> {it.chair_next}</p> : null}
                         </div>
                       ) : null}
                     </section>
