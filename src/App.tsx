@@ -37,6 +37,8 @@ const BACKEND_BASE = (
   DEFAULT_BACKEND_BASE
 ).replace(/\/+$/, "");
 
+type ApiRequestInit = RequestInit & { timeoutMs?: number };
+
 type AttachmentKind = "doc" | "code" | "image";
 type AttachmentStatus = "uploading" | "ready" | "error";
 type MessageRole = "user" | "assistant";
@@ -523,8 +525,45 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(path), init);
+async function fetchJson<T>(path: string, init?: ApiRequestInit): Promise<T> {
+  const timeoutMs = init?.timeoutMs;
+  const { timeoutMs: _timeoutMs, signal, ...requestInit } = init ?? {};
+  const controller = new AbortController();
+  const useAbortController = Boolean(timeoutMs || signal);
+  let timeoutId: number | undefined;
+  let abortFromParent: (() => void) | undefined;
+
+  if (signal) {
+    abortFromParent = () => controller.abort();
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", abortFromParent, { once: true });
+    }
+  }
+  if (timeoutMs && timeoutMs > 0) {
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), {
+      ...requestInit,
+      ...(useAbortController ? { signal: controller.signal } : {}),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError" && timeoutMs) {
+      throw new Error(`Request timeout after ${Math.round(timeoutMs / 1000)}s: ${path}`);
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+    if (signal && abortFromParent) {
+      signal.removeEventListener("abort", abortFromParent);
+    }
+  }
   const text = await response.text();
   let payload: unknown = {};
 
@@ -547,7 +586,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 function friendlyErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error || "Onbekende fout");
-  if (/load failed|failed to fetch|networkerror/i.test(message)) {
+  if (/aborterror|aborted|request timeout|load failed|failed to fetch|networkerror/i.test(message)) {
     return "De backend reageerde niet op tijd of de verbinding met 127.0.0.1:8010 werd onderbroken. Probeer opnieuw; trage modelcalls vallen nu terug op transcript-fallbacks.";
   }
   return message;
@@ -2748,6 +2787,7 @@ function App() {
       intake = await fetchJson<DevelopmentTeamIntakeResult>("/api/ouroboros-chat/development-team/intake", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        timeoutMs: 15_000,
         body: JSON.stringify({
           prompt: promptText,
           provider: devProvider,
