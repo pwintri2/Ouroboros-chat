@@ -233,6 +233,7 @@ type SavedMeetingRecord = {
 
 type DevelopmentTeamRound = {
   id: string;
+  round?: number;
   phase: string;
   participantId?: string;
   participantName: string;
@@ -253,9 +254,9 @@ type DevelopmentTeamResult = {
   rounds?: DevelopmentTeamRound[];
   build_prompt?: string;
   summary?: string;
-  meeting_id?: string;
-  meeting_type?: string;
-  augmented_prompt?: string;
+  meeting_id?: string | null;
+  meeting_type?: string | null;
+  augmented_prompt?: string | null;
 };
 
 type DevelopmentTeamIntakeResult = {
@@ -1297,6 +1298,7 @@ function App() {
   // bigger model from the dropdown when they're prepared to wait for it.
   const [devModel, setDevModel] = useState("ouroboros:latest");
   const [devMaxIterations, setDevMaxIterations] = useState(3);
+  const [devMinIterations, setDevMinIterations] = useState(2);
   const [devRunning, setDevRunning] = useState(false);
   const [devResult, setDevResult] = useState<DevelopmentTeamResult | null>(null);
   const [devError, setDevError] = useState("");
@@ -2783,25 +2785,142 @@ function App() {
   ) {
     setDevRunning(true);
     setDevError("");
+    setDevResult((prev) => prev ? { ...prev, rounds: [] } : null);
+    
+    const personaIdsToUse = personaIds.length ? personaIds : ["de-voorzitter", "de-developer", "de-tester", "de-criticus"];
+    
     try {
-      const payload = await fetchJson<DevelopmentTeamResult>("/api/ouroboros-chat/development-team", {
+      // Use streaming endpoint for live updates
+      const response = await fetch(apiUrl("/api/ouroboros-chat/meetings/stream"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({
-          prompt: promptText,
-          persona_ids: personaIds,
-          agent_ids: agentIds,
+          topic: promptText,
+          meeting_type: "development_team",
+          participants: personaIdsToUse,
           provider: devProvider,
           model: devModel,
-          max_iterations: devMaxIterations,
-          clarifications,
+          tools: [],
+          allow_tools: false,
         }),
       });
-      setDevResult(payload);
-      setDevEditableBuildPrompt(payload?.build_prompt || "");
+      
+      if (!response.ok || !response.body) {
+        const detail = response.status === 404
+          ? "De streaming endpoint ontbreekt — herbouw de backend."
+          : `Meeting start mislukt: HTTP ${response.status}`;
+        setDevError(detail);
+        setDevRunning(false);
+        return;
+      }
+      
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let meetingId: string | null = null;
+      let buildPromptFromMeeting = "";
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          let dataPayload = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) {
+              dataPayload += line.slice(5).trimStart();
+            }
+          }
+          if (!dataPayload) continue;
+          try {
+            const event = JSON.parse(dataPayload);
+            const type = String(event.type || "");
+            
+            // Handle meeting events
+            if (type === "meeting_started") {
+              meetingId = String(event.meeting_id || "");
+              // Update devResult with meeting started info
+              setDevResult((prev) => ({
+                ...(prev || {} as DevelopmentTeamResult),
+                meeting_id: meetingId,
+                meeting_type: "development_team",
+                status: "running",
+                rounds: prev?.rounds || [],
+              }));
+            } else if (type === "participant_turn") {
+              // This is the main event type for meeting rounds
+              const participant = event.participant || {};
+              const round: DevelopmentTeamRound = {
+                id: String(event.meeting_id || meetingId || Date.now()),
+                round: event.round !== undefined ? Number(event.round) : undefined,
+                phase: String(event.phase || ""),
+                participantId: String(participant.id || participant.name || ""),
+                participantName: String(participant.name || participant.id || ""),
+                content: String(event.content || ""),
+                createdAt: String(event.timestamp || nowIso()),
+              };
+              // Update devResult with the new round
+              setDevResult((prev) => {
+                const existingRounds = prev?.rounds || [];
+                // Check if this round already exists (same round number and participant)
+                const exists = existingRounds.some(
+                  (r) => r.participantId === round.participantId && r.phase === round.phase
+                );
+                if (exists) {
+                  return prev || null;
+                }
+                return {
+                  ...(prev || {} as DevelopmentTeamResult),
+                  meeting_id: meetingId,
+                  meeting_type: "development_team",
+                  status: "running",
+                  rounds: [...existingRounds, round],
+                };
+              });
+            } else if (type === "meeting_recorded") {
+              // Final event with build_prompt
+              buildPromptFromMeeting = String(event.build_prompt || event.summary || "");
+              const summary = String(event.summary || "");
+              const augmentedTopic = String(event.augmented_topic || event.topic || promptText);
+              
+              setDevResult((prev) => ({
+                ...(prev || {} as DevelopmentTeamResult),
+                status: "planned",
+                execution: "not_executed_by_ouroboros_chat_router",
+                approval_required: true,
+                approval_phrase: "Akkoord",
+                approval_supplied: false,
+                prompt: promptText,
+                build_prompt: buildPromptFromMeeting,
+                augmented_prompt: augmentedTopic,
+                summary: summary,
+                meeting_id: meetingId,
+                meeting_type: "development_team",
+                agent_command: "/codex",
+                slash_prompt: `/codex ${buildPromptFromMeeting}\n\n---\nOuroboros development protocol:\n- Build in Docker-isolated sandbox\n- Iterate: smallest diff, test, review\n- Report files touched and tests run\n- Approval phrase: Akkoord`,
+                clarifications_supplied: clarifications,
+              }));
+              setDevEditableBuildPrompt(buildPromptFromMeeting);
+            } else if (type === "meeting_error") {
+              setDevError(String(event.error || "Meeting fout"));
+            } else if (type === "meeting_summary") {
+              // Intermediate summary event
+              setDevResult((prev) => ({
+                ...(prev || {} as DevelopmentTeamResult),
+                summary: String(event.summary || prev?.summary || ""),
+              }));
+            }
+          } catch (parseError) {
+            console.warn("Failed to parse meeting SSE frame", parseError);
+          }
+        }
+      }
     } catch (error) {
-      setDevResult(null);
       setDevError(friendlyErrorMessage(error));
+      setDevResult(null);
     } finally {
       setDevRunning(false);
     }
@@ -2891,7 +3010,9 @@ function App() {
           provider: devProvider,
           model: devModel,
           max_iterations: Math.max(1, Math.min(6, devMaxIterations || 4)),
+          min_iterations: Math.max(1, Math.min(4, devMinIterations || 2)),
           test_timeout_seconds: 120,
+          llm_timeout_seconds: 90,
         }),
       });
     } catch (error) {
@@ -2955,7 +3076,7 @@ function App() {
         }
         if (type === "build_complete") {
           next.status = "complete";
-          next.finalMessage = `Build groen na ${payload.iterations || "?"} iteratie(s).`;
+          next.finalMessage = String(payload.summary || `Build groen na ${payload.iterations || "?"} iteratie(s).`);
         }
         if (type === "build_exhausted") {
           next.status = "exhausted";
@@ -3471,13 +3592,23 @@ function App() {
                 </select>
               </label>
               <label className="compact-field">
-                <span>Iteraties</span>
+                <span>Max iteraties</span>
                 <input
                   type="number"
                   min={1}
                   max={8}
                   value={devMaxIterations}
                   onChange={(event) => setDevMaxIterations(Number(event.target.value) || 3)}
+                />
+              </label>
+              <label className="compact-field">
+                <span>Min iteraties</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={4}
+                  value={devMinIterations}
+                  onChange={(event) => setDevMinIterations(Number(event.target.value) || 2)}
                 />
               </label>
             </div>
@@ -3597,13 +3728,14 @@ function App() {
                   />
                 </label>
                 <button
-                  className="meeting-action"
+                  className="meeting-action secondary"
                   type="button"
                   onClick={() => void approveAndStartDevelopmentBuild()}
                   disabled={devLaunchRunning || devApproval.trim() !== "Akkoord"}
+                  title="Deze route is een fallback naar /codex die in de huidige setup mockt. Gebruik 'Bouw uit met team (Aider-modus)' voor echte iteratieve builds."
                 >
                   {devLaunchRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
-                  <span>Start bouwen</span>
+                  <span>Start externe bouwer (Codex)</span>
                 </button>
               </div>
             ) : null}
