@@ -24,5 +24,20 @@ export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
 export GDK_BACKEND="${GDK_BACKEND:-wayland,x11}"
 export NO_AT_BRIDGE="${NO_AT_BRIDGE:-1}"
 
+SNAP_GNOME_LIB="/snap/gnome-46-2404/current/usr/lib/x86_64-linux-gnu"
+SNAP_MESA_LIB="/snap/mesa-2404/current/usr/lib/x86_64-linux-gnu"
+SNAP_CORE_LIB="/snap/core24/current/usr/lib/x86_64-linux-gnu"
+RUNTIME_LIB_DIR="$HOME/.cache/tauri-runtime-libs"
+
+if [[ -d "$SNAP_GNOME_LIB" && -d "$SNAP_MESA_LIB" ]]; then
+  mkdir -p "$RUNTIME_LIB_DIR"
+  for lib_name in libbsd.so.0 libkeyutils.so.1 libmd.so.0; do
+    if [[ -e "$SNAP_CORE_LIB/$lib_name" ]]; then
+      ln -sf "$SNAP_CORE_LIB/$lib_name" "$RUNTIME_LIB_DIR/$lib_name"
+    fi
+  done
+  export LD_LIBRARY_PATH="$RUNTIME_LIB_DIR:$SNAP_GNOME_LIB:$SNAP_MESA_LIB:${LD_LIBRARY_PATH:-}"
+fi
+
 cd "$APP_ROOT"
 exec "$APP_BIN" "$@"

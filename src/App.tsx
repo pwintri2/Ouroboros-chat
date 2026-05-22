@@ -255,6 +255,7 @@ type DevelopmentTeamResult = {
   safety_note?: string;
   rounds?: DevelopmentTeamRound[];
   build_prompt?: string;
+  build_plan?: Record<string, unknown> | null;
   summary?: string;
   meeting_id?: string | null;
   meeting_type?: string | null;
@@ -276,6 +277,8 @@ type BuildFileWrite = { path: string; bytes_written: number; truncated?: boolean
 
 type BuildIteration = {
   iteration: number;
+  foreman?: string;
+  designer?: string;
   developer?: string;
   tester?: string;
   critic?: string;
@@ -2922,6 +2925,10 @@ function App() {
             } else if (type === "meeting_recorded") {
               // Final event with build_prompt
               buildPromptFromMeeting = String(event.build_prompt || event.summary || "");
+              const buildPlanFromMeeting =
+                event.build_plan && typeof event.build_plan === "object"
+                  ? (event.build_plan as Record<string, unknown>)
+                  : null;
               const summary = String(event.summary || "");
               const augmentedTopic = String(event.augmented_topic || event.topic || promptText);
               
@@ -2934,6 +2941,7 @@ function App() {
                 approval_supplied: false,
                 prompt: promptText,
                 build_prompt: buildPromptFromMeeting,
+                build_plan: buildPlanFromMeeting,
                 augmented_prompt: augmentedTopic,
                 summary: summary,
                 meeting_id: meetingId,
@@ -3028,6 +3036,11 @@ function App() {
     // Reset prior build state and open the SSE stream against the new /development-team/build route.
     const buildPrompt = (devEditableBuildPrompt || devResult?.build_prompt || "").trim();
     if (!buildPrompt || devTeamBuildRunning) return;
+    const originalBuildPrompt = (devResult?.build_prompt || "").trim();
+    const buildPlanForRequest =
+      devResult?.build_plan && (!devEditableBuildPrompt.trim() || devEditableBuildPrompt.trim() === originalBuildPrompt)
+        ? devResult.build_plan
+        : undefined;
     setDevTeamBuildRunning(true);
     setDevTeamBuildError("");
     setDevTeamBuild({
@@ -3043,6 +3056,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({
+          build_plan: buildPlanForRequest,
           build_prompt: buildPrompt,
           persona_ids: personaIds,
           clarifications: [],
@@ -3092,6 +3106,8 @@ function App() {
         const iterationNum = Number(payload.iteration);
         if (Number.isFinite(iterationNum) && iterationNum > 0) {
           const existing = next.iterations[iterationNum] || { iteration: iterationNum };
+          if (type === "foreman_turn") existing.foreman = String(payload.content || "");
+          if (type === "designer_turn") existing.designer = String(payload.content || "");
           if (type === "developer_turn") existing.developer = String(payload.content || "");
           if (type === "files_written") existing.files = (payload.files as BuildFileWrite[]) || [];
           if (type === "tester_turn") existing.tester = String(payload.content || "");
@@ -3927,6 +3943,18 @@ function App() {
                         ) : null}
                         {it.duration_s !== undefined ? <small>{it.duration_s.toFixed(2)}s</small> : null}
                       </header>
+                      {it.foreman ? (
+                        <div className="dev-build-role">
+                          <em>Voorman</em>
+                          <p>{it.foreman}</p>
+                        </div>
+                      ) : null}
+                      {it.designer ? (
+                        <div className="dev-build-role">
+                          <em>Ontwerper</em>
+                          <p>{it.designer}</p>
+                        </div>
+                      ) : null}
                       {it.developer ? (
                         <div className="dev-build-role">
                           <em>De Developper</em>
@@ -3967,7 +3995,7 @@ function App() {
                       ) : null}
                       {it.chair_verdict ? (
                         <div className={`dev-build-role chair-${it.chair_verdict.toLowerCase()}`}>
-                          <em>Voorzitter — {it.chair_verdict === "DONE" ? "build af" : "ga door"}</em>
+                          <em>Voorman — {it.chair_verdict === "DONE" ? "build af" : "ga door"}</em>
                           {it.chair_reason ? <p>{it.chair_reason}</p> : null}
                           {it.chair_next ? <p className="dev-build-next-subtask"><strong>Volgende stap:</strong> {it.chair_next}</p> : null}
                         </div>
