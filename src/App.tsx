@@ -488,7 +488,7 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
   },
 ];
 
-const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-ontwerper", "de-criticus"];
+const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-developer", "de-tester", "de-criticus", "de-ontwerper"];
 const MEETING_TYPE_OPTIONS: Array<{ id: MeetingType; label: string; hint: string; icon: "team" | "sprint" | "brainstorm" }> = [
   { id: "team", label: "Team vergadering", hint: "keuze + eigenaar", icon: "team" },
   { id: "sprint_planning", label: "Sprint planning", hint: "taak + test + rollback", icon: "sprint" },
