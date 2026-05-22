@@ -2755,9 +2755,8 @@ function App() {
         }),
       });
     } catch (error) {
-      setDevIntakeRunning(false);
-      setDevError(`Intake mislukt: ${friendlyErrorMessage(error)}`);
-      return;
+      console.warn("Intake failed or timed out, skipping clarification and proceeding.", error);
+      intake = null;
     }
     setDevIntakeRunning(false);
 
