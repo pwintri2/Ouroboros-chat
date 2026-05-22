@@ -431,6 +431,14 @@ const INITIAL_MEMBERS: MeetingMember[] = [
   { id: "deepseek", name: "DeepSeek", handle: "/deepseek", selected: false, online: true, source: "agent" },
 ];
 
+const DEVELOPMENT_TEAM_MEMBERS: MeetingMember[] = [
+  { id: "dev-voorman", name: "Voorman", handle: "foreman", selected: true, online: true, source: "persona", avatar: { kind: "initials", color: "#7bdcc3" } },
+  { id: "dev-ontwerper", name: "Ontwerper", handle: "designer", selected: true, online: true, source: "persona", avatar: { kind: "initials", color: "#f2c97d" } },
+  { id: "dev-developper", name: "De Developper", handle: "developer", selected: true, online: true, source: "persona", avatar: { kind: "initials", color: "#a3a8f0" } },
+  { id: "dev-tester", name: "De Tester", handle: "tester", selected: true, online: true, source: "persona", avatar: { kind: "initials", color: "#5dd5b2" } },
+  { id: "dev-critikus", name: "Critikus", handle: "criticus", selected: true, online: true, source: "persona", avatar: { kind: "initials", color: "#fb7185" } },
+];
+
 const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
   {
     id: "ollama",
@@ -493,7 +501,20 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
   },
 ];
 
-const DEFAULT_PERSONA_ORDER = ["de-voorzitter", "de-developer", "de-tester", "de-criticus", "de-ontwerper"];
+const DEFAULT_PERSONA_ORDER = ["ouroboros"];
+const DEVELOPMENT_PERSONA_IDS = new Set([
+  "de-voorzitter",
+  "de-ontwerper",
+  "de-developer",
+  "de-developper",
+  "de-tester",
+  "de-criticus",
+  "dev-voorman",
+  "dev-ontwerper",
+  "dev-developper",
+  "dev-tester",
+  "dev-critikus",
+]);
 const MEETING_TYPE_OPTIONS: Array<{ id: MeetingType; label: string; hint: string; icon: "team" | "sprint" | "brainstorm" }> = [
   { id: "team", label: "Team vergadering", hint: "keuze + eigenaar", icon: "team" },
   { id: "sprint_planning", label: "Sprint planning", hint: "taak + test + rollback", icon: "sprint" },
@@ -962,7 +983,13 @@ function isChairParticipant(id?: string, name = "", role = ""): boolean {
   const normalizedId = String(id || "").toLowerCase();
   const normalizedName = name.toLowerCase();
   const normalizedRole = role.toLowerCase();
-  return normalizedId === "de-voorzitter" || normalizedName.includes("voorzitter") || normalizedRole.includes("facilitator");
+  return (
+    normalizedId === "de-voorzitter"
+    || normalizedId === "dev-voorman"
+    || normalizedName.includes("voorzitter")
+    || normalizedName.includes("voorman")
+    || normalizedRole.includes("facilitator")
+  );
 }
 
 function formatMeetingType(type?: string): string {
@@ -1379,7 +1406,7 @@ function App() {
   const currentThread = threadsById[activeThreadId];
   const activeMeeting = activeMeetingId ? meetingsById[activeMeetingId] : undefined;
   const messages = currentThread?.messages || [];
-  const savedPersonas = useMemo(() => Object.values(personasById).sort((left, right) => {
+  const savedPersonas = useMemo(() => Object.values(personasById).filter((record) => !DEVELOPMENT_PERSONA_IDS.has(record.id)).sort((left, right) => {
     const leftDefault = DEFAULT_PERSONA_ORDER.indexOf(left.id);
     const rightDefault = DEFAULT_PERSONA_ORDER.indexOf(right.id);
     if (leftDefault >= 0 || rightDefault >= 0) {
@@ -1561,7 +1588,7 @@ function App() {
     setMeetingMembers((previous) => {
       const previousSelected = new Map(previous.map((member) => [member.id, member.selected]));
       const personaMembers = personaRecords
-        .filter((record) => !record.archived)
+        .filter((record) => !record.archived && !DEVELOPMENT_PERSONA_IDS.has(record.id))
         .map((record) => memberFromPersona(record, previousSelected.get(record.id) ?? (record.id === selectedPersonaId || DEFAULT_PERSONA_ORDER.includes(record.id))));
       const agentMembers = INITIAL_MEMBERS.map((member) => ({
         ...member,
@@ -2752,27 +2779,8 @@ function App() {
     setDevModel(option?.default_model || option?.models[0] || devModel || DEFAULT_MODEL);
   }
 
-  const DEV_TEAM_DEFAULT_PERSONA_IDS = ["de-voorzitter", "de-developer", "de-tester", "de-criticus"];
-
-  function resolveDevPersonaIds(personaOverride?: string[]): string[] {
-    // The dev-team workspace must run the four canonical roles — voorzitter, developer,
-    // tester, criticus — even when the user has unrelated personas (Nina, Poocky, ...)
-    // ticked on the meeting tab. Only a personaOverride that explicitly contains one of
-    // the dev-team personas counts as a deliberate change; otherwise we always seed the
-    // four defaults.
-    const explicit = (personaOverride || []).filter(Boolean);
-    const explicitHasDevTeam = explicit.some((id) => DEV_TEAM_DEFAULT_PERSONA_IDS.includes(id));
-    if (explicit.length && explicitHasDevTeam) {
-      return personasById["de-voorzitter"] && !explicit.includes("de-voorzitter")
-        ? ["de-voorzitter", ...explicit]
-        : explicit;
-    }
-    return DEV_TEAM_DEFAULT_PERSONA_IDS.filter((id) => Boolean(personasById[id]));
-  }
-
-  async function startDevelopmentTeam(promptOverride?: string, personaOverride?: string[], agentOverride?: string[]) {
+  async function startDevelopmentTeam(promptOverride?: string, _personaOverride?: string[], _agentOverride?: string[]) {
     const promptText = promptOverride?.trim() || devPrompt.trim() || meetingTopic.trim() || "Maak een robuuste implementatie en draai tests.";
-    const agentIds = agentOverride?.length ? agentOverride : selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
     setDevError("");
     setDevLaunchError("");
     setDevLaunchResult(null);
@@ -2815,35 +2823,32 @@ function App() {
       return;
     }
 
-    // No clarification needed — go straight to the four-persona meeting.
-    await runDevelopmentTeamMeeting(promptText, resolveDevPersonaIds(personaOverride), agentIds, []);
+    // No clarification needed — go straight to the isolated five-role Development Team.
+    await runDevelopmentTeamMeeting(promptText, [], [], []);
   }
 
   async function runDevelopmentTeamMeeting(
     promptText: string,
-    personaIds: string[],
-    agentIds: string[],
+    _personaIds: string[],
+    _agentIds: string[],
     clarifications: ClarificationAnswer[]
   ) {
     setDevRunning(true);
     setDevError("");
     setDevResult((prev) => prev ? { ...prev, rounds: [] } : null);
     
-    const personaIdsToUse = personaIds.length ? personaIds : ["de-voorzitter", "de-developer", "de-tester", "de-criticus"];
-    
     try {
-      // Use streaming endpoint for live updates
-      const response = await fetch(apiUrl("/api/ouroboros-chat/meetings/stream"), {
+      // Use the isolated Development Team streaming endpoint for live updates.
+      const response = await fetch(apiUrl("/api/ouroboros-chat/development-team/stream"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({
-          topic: promptText,
-          meeting_type: "development_team",
-          participants: personaIdsToUse,
+          prompt: promptText,
+          persona_ids: [],
+          agent_ids: [],
           provider: devProvider,
           model: devModel,
-          tools: [],
-          allow_tools: false,
+          clarifications,
         }),
       });
       
@@ -2980,47 +2985,33 @@ function App() {
       answer: (devClarificationAnswers[question] || "").trim(),
     }));
     const promptText = devPrompt.trim() || "Maak een robuuste implementatie en draai tests.";
-    const personaIds = resolveDevPersonaIds();
-    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
     // Clear the form so the UI moves on to the running-meeting state.
     setDevClarificationQuestions([]);
     setDevClarificationAnswers({});
-    await runDevelopmentTeamMeeting(promptText, personaIds, agentIds, pairs);
+    await runDevelopmentTeamMeeting(promptText, [], [], pairs);
   }
 
   function skipDevTeamClarifications() {
     if (!devClarificationQuestions.length) return;
     const promptText = devPrompt.trim() || "Maak een robuuste implementatie en draai tests.";
-    const personaIds = resolveDevPersonaIds();
-    const agentIds = selectedAgentMembers.length ? selectedAgentMembers.map((member) => member.id) : ["codex"];
     setDevClarificationQuestions([]);
     setDevClarificationAnswers({});
-    void runDevelopmentTeamMeeting(promptText, personaIds, agentIds, []);
+    void runDevelopmentTeamMeeting(promptText, [], [], []);
   }
 
   function continueMeetingInDevelopmentTeam(autoPlan = false) {
     const meeting = activeMeeting;
     if (!meeting?.summary) return;
     const promptText = meetingDevelopmentPrompt(meeting);
-    const personaIds = meeting.personaIds.length ? meeting.personaIds : selectedPersonaMembers.map((member) => member.id);
-    const agentIds = meeting.agentIds.length ? meeting.agentIds : selectedAgentMembers.map((member) => member.id);
-    const safeAgentIds = agentIds.length ? agentIds : ["codex"];
     setDevPrompt(promptText);
     setDevResult(null);
     setDevError("");
     setDevApproval("");
     setDevLaunchError("");
     setDevLaunchResult(null);
-    setMeetingMembers((previous) =>
-      previous.map((member) =>
-        member.source === "agent" && safeAgentIds.includes(member.id)
-          ? { ...member, selected: true }
-          : member
-      )
-    );
     setViewMode("development_team");
     if (autoPlan) {
-      void startDevelopmentTeam(promptText, personaIds, safeAgentIds);
+      void startDevelopmentTeam(promptText, [], []);
     }
   }
 
@@ -3049,7 +3040,6 @@ function App() {
       status: "running",
       startedAt: nowIso(),
     });
-    const personaIds = resolveDevPersonaIds();
     let response: Response;
     try {
       response = await fetch(apiUrl("/api/ouroboros-chat/development-team/build"), {
@@ -3058,7 +3048,7 @@ function App() {
         body: JSON.stringify({
           build_plan: buildPlanForRequest,
           build_prompt: buildPrompt,
-          persona_ids: personaIds,
+          persona_ids: [],
           clarifications: [],
           provider: devProvider,
           model: devModel,
@@ -3596,8 +3586,7 @@ function App() {
   }
 
   function renderDevelopmentTeamWorkspace() {
-    const personaCount = selectedPersonaMembers.length;
-    const agentIds = selectedAgentMembers.length ? selectedAgentMembers : agentMeetingMembers.filter((member) => member.id === "codex");
+    const developmentMembers = DEVELOPMENT_TEAM_MEMBERS;
     const rounds = devResult?.rounds || [];
 
     return (
@@ -3677,7 +3666,7 @@ function App() {
                 {devRunning || devIntakeRunning ? <Loader2 size={17} /> : <Code2 size={17} />}
                 <span>
                   {devIntakeRunning
-                    ? "Voorzitter denkt na..."
+                    ? "Voorman denkt na..."
                     : devRunning
                       ? "Team overlegt..."
                       : "Start team"}
@@ -3692,7 +3681,7 @@ function App() {
             {devClarificationQuestions.length > 0 ? (
               <div className="dev-clarification-card" role="dialog" aria-label="Verduidelijkingsvragen van de voorzitter">
                 <div className="dev-clarification-header">
-                  <strong>De voorzitter heeft eerst een paar vragen</strong>
+                  <strong>De Voorman heeft eerst een paar vragen</strong>
                   <small>Beantwoord wat je weet — wat je open laat mag het team zelf invullen.</small>
                 </div>
                 {devClarificationQuestions.map((question, index) => (
@@ -3797,12 +3786,11 @@ function App() {
           </section>
 
           <section className="participant-bar" aria-label="Development team members">
-            {[...selectedPersonaMembers, ...agentIds].map((member) => (
+            {developmentMembers.map((member) => (
               <button
-                className={`participant-chip ${isChairParticipant(member.id, member.name) ? "chair-chip" : ""}`}
+                className={`participant-chip ${member.id === "dev-voorman" ? "chair-chip" : ""}`}
                 type="button"
                 key={`${member.source}-${member.id}`}
-                onClick={() => toggleMeetingMember(member.id)}
                 title={member.name}
               >
                 <span className={`speaker-lamp ${devRunning ? "live" : "resting"}`} aria-hidden="true" />
@@ -3814,26 +3802,25 @@ function App() {
                 </span>
                 <span>
                   <strong>{member.name}</strong>
-                  <small>{member.source === "agent" ? member.handle : isChairParticipant(member.id, member.name) ? "voorzitter" : "persona"}</small>
+                  <small>{member.handle}</small>
                 </span>
               </button>
             ))}
-            {!personaCount ? <span className="empty-note">Selecteer persona's of gebruik de standaard voorzitter.</span> : null}
           </section>
 
           <section className="meeting-selector-grid" aria-label="Development team selection">
             <div className="meeting-selector-column">
               <div className="member-section-label">
-                <span>Persona's</span>
-                <small>{selectedPersonaMembers.length} selected</small>
+                <span>Development agents</span>
+                <small>{developmentMembers.length} vast</small>
               </div>
               <div className="meeting-selector-list">
-                {personaMeetingMembers.map((member) => (
+                {developmentMembers.map((member) => (
                   <button
-                    className={`member-row ${member.selected ? "selected" : ""}`}
+                    className="member-row selected"
                     key={member.id}
                     type="button"
-                    onClick={() => toggleMeetingMember(member.id)}
+                    disabled
                   >
                     <span
                       className={`member-avatar ${member.online ? "online" : ""}`}
@@ -3843,32 +3830,9 @@ function App() {
                     </span>
                     <span>
                       <strong>{member.name}</strong>
-                      <small>persona</small>
-                    </span>
-                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="meeting-selector-column">
-              <div className="member-section-label secondary">
-                <span>CLI agents</span>
-                <small>{selectedAgentMembers.length || 1} selected</small>
-              </div>
-              <div className="meeting-selector-list">
-                {agentMeetingMembers.map((member) => (
-                  <button
-                    className={`member-row secondary ${member.selected ? "selected" : ""}`}
-                    key={member.id}
-                    type="button"
-                    onClick={() => toggleMeetingMember(member.id)}
-                  >
-                    <span className={`member-avatar ${member.online ? "online" : ""}`}>{initials(member.name)}</span>
-                    <span>
-                      <strong>{member.name}</strong>
                       <small>{member.handle}</small>
                     </span>
-                    {member.selected ? <Check size={16} /> : <Plus size={16} />}
+                    <Check size={16} />
                   </button>
                 ))}
               </div>
