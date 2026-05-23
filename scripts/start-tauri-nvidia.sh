@@ -28,6 +28,14 @@ SNAP_GNOME_LIB="/snap/gnome-46-2404/current/usr/lib/x86_64-linux-gnu"
 SNAP_MESA_LIB="/snap/mesa-2404/current/usr/lib/x86_64-linux-gnu"
 SNAP_CORE_LIB="/snap/core24/current/usr/lib/x86_64-linux-gnu"
 RUNTIME_LIB_DIR="$HOME/.cache/tauri-runtime-libs"
+APPIMAGE_LIB_DIR="$APP_ROOT/src-tauri/target/release/bundle/appimage/Ouroboros Chat.AppDir/usr/lib"
+COCKPIT_APPIMAGE_LIB_DIR="${WINTRIP_ROOT:-/home/pwintri2/WintripAI}/ouroboros_cockpit/src-tauri/target/debug/bundle/appimage/Ouroboros Cockpit.AppDir/usr/lib"
+
+for lib_dir in "$APPIMAGE_LIB_DIR" "$COCKPIT_APPIMAGE_LIB_DIR"; do
+  if [[ -d "$lib_dir" ]]; then
+    export LD_LIBRARY_PATH="$lib_dir:${LD_LIBRARY_PATH:-}"
+  fi
+done
 
 if [[ -d "$SNAP_GNOME_LIB" && -d "$SNAP_MESA_LIB" ]]; then
   mkdir -p "$RUNTIME_LIB_DIR"

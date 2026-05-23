@@ -501,9 +501,8 @@ const FALLBACK_MODEL_OPTIONS: ModelProviderOption[] = [
   },
 ];
 
-const DEFAULT_PERSONA_ORDER = ["ouroboros"];
+const DEFAULT_PERSONA_ORDER = ["ouroboros", "de-voorzitter"];
 const DEVELOPMENT_PERSONA_IDS = new Set([
-  "de-voorzitter",
   "de-ontwerper",
   "de-developer",
   "de-developper",
